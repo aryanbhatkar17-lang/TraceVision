@@ -1,0 +1,66 @@
+@import "tailwindcss";
+
+@theme {
+  --color-background: #050505;
+  --color-foreground: #E2E8F0;
+  
+  --color-card: #0A0A0C;
+  --color-card-foreground: #E2E8F0;
+  
+  --color-popover: #0A0A0C;
+  --color-popover-foreground: #E2E8F0;
+  
+  --color-primary: #10B981;
+  --color-primary-foreground: #050505;
+  
+  --color-secondary: #121316;
+  --color-secondary-foreground: #E2E8F0;
+  
+  --color-muted: #121316;
+  --color-muted-foreground: #64748B;
+  
+  --color-accent: #10B981;
+  --color-accent-foreground: #050505;
+  
+  --color-destructive: #F59E0B;
+  --color-destructive-foreground: #050505;
+  
+  --color-border: #1F242D;
+  --color-input: #1F242D;
+  --color-ring: #10B981;
+  
+  --radius: 0.25rem;
+}
+
+@layer utilities {
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 4px;
+    height: 4px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background: #1F242D;
+    border-radius: 2px;
+  }
+  
+  /* Cyber-Noir CRT Scanlines and Matrix Glow */
+  .crt-scanlines {
+    background: linear-gradient(
+      rgba(18, 16, 16, 0) 50%, 
+      rgba(0, 0, 0, 0.25) 50%
+    );
+    background-size: 100% 4px;
+  }
+  
+  .matrix-glow {
+    box-shadow: 0 0 20px -5px rgba(16, 185, 129, 0.2);
+  }
+}
+
+body {
+  background-color: var(--color-background);
+  color: var(--color-foreground);
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+}
