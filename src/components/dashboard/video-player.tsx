@@ -1,142 +1,346 @@
 'use client'
 
-import { useState } from 'react'
-import { Play, Pause, Volume2, Maximize2, ShieldAlert } from 'lucide-react'
+import { useRef, useEffect, useState, DragEvent } from 'react'
+import { Play, Pause, Volume2, VolumeX, Maximize2, UploadCloud, VideoOff, Radio } from 'lucide-react'
 import { cn } from '@/lib/utils'
-
-interface Marker {
-  id: string
-  position: number
-  label: string
-  color: 'primary' | 'accent'
-}
+import { TimelineMarker } from '@/types/audit'
 
 interface VideoPlayerProps {
-  markers: Marker[]
-  activeMarkerId: string
-  onScrub: (id: string) => void
+  videoUrl: string | null
+  videoName?: string
+  duration: number
+  currentTime: number
+  isPlaying: boolean
+  markers: TimelineMarker[]
+  activeMarkerId: string | null
+  onPlayPause: () => void
+  onSeek: (seconds: number) => void
+  onSelectMarker: (id: string, seconds: number) => void
+  onFileUpload: (file: File) => void
+  onTimeUpdate?: (seconds: number) => void
+  onLoadedMetadata?: (duration: number) => void
 }
 
-export function VideoPlayer({ markers, activeMarkerId, onScrub }: VideoPlayerProps) {
-  const [isPlaying, setIsPlaying] = useState(false)
-  const [currentTime, setCurrentTime] = useState(7403)
-  const totalDuration = 9717
+function formatTime(seconds: number): string {
+  if (isNaN(seconds) || seconds < 0) return '00:00'
+  const hrs = Math.floor(seconds / 3600)
+  const mins = Math.floor((seconds % 3600) / 60)
+  const secs = Math.floor(seconds % 60)
+  if (hrs > 0) {
+    return `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`
+  }
+  return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`
+}
 
-  const progressPercent = (currentTime / totalDuration) * 100
+export function VideoPlayer({
+  videoUrl,
+  videoName,
+  duration,
+  currentTime,
+  isPlaying,
+  markers,
+  activeMarkerId,
+  onPlayPause,
+  onSeek,
+  onSelectMarker,
+  onFileUpload,
+  onTimeUpdate,
+  onLoadedMetadata,
+}: VideoPlayerProps) {
+  const videoRef = useRef<HTMLVideoElement | null>(null)
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const [isMuted, setIsMuted] = useState(false)
+  const [isDragging, setIsDragging] = useState(false)
+
+  // Synchronize play/pause with external state
+  useEffect(() => {
+    if (!videoRef.current) return
+    if (isPlaying) {
+      videoRef.current.play().catch(() => {})
+    } else {
+      videoRef.current.pause()
+    }
+  }, [isPlaying])
+
+  // Synchronize seek position when currentTime changes externally by more than 0.5s
+  useEffect(() => {
+    if (!videoRef.current) return
+    if (Math.abs(videoRef.current.currentTime - currentTime) > 0.6) {
+      videoRef.current.currentTime = currentTime
+    }
+  }, [currentTime])
+
+  const handleDragOver = (e: DragEvent<HTMLDivElement>) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setIsDragging(true)
+  }
+
+  const handleDragLeave = (e: DragEvent<HTMLDivElement>) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setIsDragging(false)
+  }
+
+  const handleDrop = (e: DragEvent<HTMLDivElement>) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setIsDragging(false)
+    const files = e.dataTransfer.files
+    if (files && files.length > 0) {
+      const file = files[0]
+      if (file.type.startsWith('video/') || /\.(mp4|avi|webm|mov|mkv)$/i.test(file.name)) {
+        onFileUpload(file)
+      }
+    }
+  }
+
+  const handleToggleFullscreen = () => {
+    if (!videoRef.current) return
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => {})
+    } else {
+      videoRef.current.requestFullscreen().catch(() => {})
+    }
+  }
+
+  const progressPercent = duration > 0 ? Math.min(100, (currentTime / duration) * 100) : 0
 
   return (
     <div className="flex flex-col gap-3">
-      {/* Screen Frame - Clean, sharp technical border instead of soft glowing cards */}
-      <div className="relative flex flex-col rounded border border-border bg-[#05070a] overflow-hidden">
+      {/* Screen Viewport Frame */}
+      <div className="relative flex flex-col rounded-lg border border-border bg-[#05070a] overflow-hidden shadow-2xl">
         {/* Top HUD Telemetry Overlay */}
-        <div className="absolute top-3 left-3 z-10 flex items-center gap-2">
-          <span className="flex items-center gap-2 rounded bg-black/80 px-2.5 py-1 font-mono text-[11px] text-red-400 border border-red-500/30">
-            <span className="size-1.5 bg-red-500 animate-pulse" />
-            REC // CAM-04
-          </span>
+        <div className="absolute top-3 left-3 z-20 flex items-center gap-2">
+          {videoUrl ? (
+            <span className="flex items-center gap-2 rounded bg-black/85 px-2.5 py-1 font-mono text-[11px] text-red-400 border border-red-500/40 backdrop-blur-md">
+              <span className="size-1.5 rounded-full bg-red-500 animate-pulse" />
+              LIVE // {videoName ? videoName.slice(0, 18) : 'CAM-01'}
+            </span>
+          ) : (
+            <span className="flex items-center gap-2 rounded bg-black/85 px-2.5 py-1 font-mono text-[11px] text-muted-foreground border border-border backdrop-blur-md">
+              <Radio className="size-3 text-muted-foreground" />
+              STANDBY // NO FEED
+            </span>
+          )}
         </div>
 
-        <div className="absolute top-3 right-3 z-10 flex items-center gap-2">
-          <span className="flex items-center gap-1.5 rounded bg-black/80 px-2.5 py-1 font-mono text-[11px] text-primary border border-primary/30">
-            AI_TRACKING: ACTIVE
-          </span>
+        <div className="absolute top-3 right-3 z-20 flex items-center gap-2">
+          {videoUrl ? (
+            <span className="flex items-center gap-1.5 rounded bg-black/85 px-2.5 py-1 font-mono text-[11px] text-primary border border-primary/40 backdrop-blur-md">
+              AI_TRACKING: READY
+            </span>
+          ) : (
+            <span className="flex items-center gap-1.5 rounded bg-black/85 px-2.5 py-1 font-mono text-[11px] text-muted-foreground border border-border backdrop-blur-md">
+              INPUT: DISCONNECTED
+            </span>
+          )}
         </div>
 
-        {/* Video Screen Viewport */}
-        <div className="relative aspect-video w-full flex items-center justify-center bg-[#020305]">
-          {/* Subtle engineering grid blueprint overlay */}
-          <div className="absolute inset-0 bg-[linear-gradient(to_right,#1a223015_1px,transparent_1px),linear-gradient(to_bottom,#1a223015_1px,transparent_1px)] bg-[size:3rem_3rem]" />
+        {/* Video Viewport / Empty State Dropzone */}
+        <div className="relative aspect-video w-full flex items-center justify-center bg-[#020305] overflow-hidden">
+          {/* Engineering grid blueprint overlay */}
+          <div className="absolute inset-0 bg-[linear-gradient(to_right,#1a223015_1px,transparent_1px),linear-gradient(to_bottom,#1a223015_1px,transparent_1px)] bg-[size:2.5rem_2.5rem] pointer-events-none" />
 
-          {/* Central Play Action Trigger */}
-          <button
-            onClick={() => setIsPlaying(!isPlaying)}
-            className="group relative flex size-14 items-center justify-center rounded bg-primary/10 border border-primary/40 text-primary transition-all hover:bg-primary/20 hover:border-primary"
-            aria-label={isPlaying ? 'Pause' : 'Play'}
-          >
-            {isPlaying ? <Pause className="size-5" /> : <Play className="size-5 translate-x-px" />}
-          </button>
+          {videoUrl ? (
+            <>
+              <video
+                ref={videoRef}
+                src={videoUrl}
+                playsInline
+                muted={isMuted}
+                onTimeUpdate={(e) => {
+                  const curr = e.currentTarget.currentTime
+                  if (onTimeUpdate) onTimeUpdate(curr)
+                }}
+                onLoadedMetadata={(e) => {
+                  const dur = e.currentTarget.duration
+                  if (onLoadedMetadata && !isNaN(dur)) onLoadedMetadata(dur)
+                }}
+                onEnded={() => {
+                  if (isPlaying) onPlayPause()
+                }}
+                className="h-full w-full object-contain"
+                onClick={onPlayPause}
+              />
 
-          {/* Timestamp Telemetry Footer on Video */}
-          <div className="absolute bottom-3 left-3 font-mono text-[11px] text-muted-foreground tracking-widest">
-            NODE_ID: 4471-B // FPS: 59.94
-          </div>
+              {/* Central Play Overlay Button on hover/pause */}
+              {!isPlaying && (
+                <button
+                  onClick={onPlayPause}
+                  className="group absolute z-10 flex size-14 items-center justify-center rounded-full bg-primary/20 border border-primary/60 text-primary transition-all hover:scale-110 hover:bg-primary/30 active:scale-95 shadow-[0_0_25px_rgba(16,185,129,0.4)]"
+                  aria-label="Play Video"
+                >
+                  <Play className="size-6 translate-x-0.5 fill-primary/30" />
+                </button>
+              )}
+
+              {/* Bottom Video HUD Overlay */}
+              <div className="absolute bottom-3 left-3 z-10 font-mono text-[10px] text-slate-400/80 tracking-widest bg-black/70 px-2 py-0.5 rounded border border-border/50">
+                FRAME_LOCK: SYNCED // DURATION: {formatTime(duration)}
+              </div>
+            </>
+          ) : (
+            /* Tactical Empty-State Dropzone */
+            <div
+              onDragOver={handleDragOver}
+              onDragLeave={handleDragLeave}
+              onDrop={handleDrop}
+              onClick={() => fileInputRef.current?.click()}
+              className={cn(
+                'group relative flex h-full w-full cursor-pointer flex-col items-center justify-center p-6 text-center transition-all duration-200 border-2 border-dashed m-2 rounded-md',
+                isDragging
+                  ? 'border-primary bg-primary/10 scale-[0.99]'
+                  : 'border-border/80 hover:border-primary/60 hover:bg-card/30'
+              )}
+            >
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="video/mp4,video/webm,video/avi,video/x-msvideo,video/quicktime,video/x-matroska"
+                className="hidden"
+                onChange={(e) => {
+                  const file = e.target.files?.[0]
+                  if (file) onFileUpload(file)
+                }}
+              />
+
+              <div className="flex size-14 items-center justify-center rounded-2xl bg-secondary/80 border border-border/80 text-muted-foreground transition-all duration-300 group-hover:border-primary/50 group-hover:text-primary group-hover:scale-105 group-hover:shadow-[0_0_20px_rgba(16,185,129,0.2)]">
+                {isDragging ? (
+                  <UploadCloud className="size-7 text-primary animate-bounce" />
+                ) : (
+                  <VideoOff className="size-7" />
+                )}
+              </div>
+
+              <div className="mt-4 max-w-sm space-y-1.5">
+                <h3 className="font-semibold text-sm text-foreground tracking-wide">
+                  No CCTV Feed Active
+                </h3>
+                <p className="text-xs text-muted-foreground leading-relaxed">
+                  Drag and drop or click <span className="text-primary font-medium underline underline-offset-2">Upload Footage</span> to begin audit.
+                </p>
+              </div>
+
+              <div className="mt-3 flex items-center gap-2 text-[10px] font-mono text-muted-foreground/70 uppercase tracking-wider">
+                <span>Supports MP4</span>
+                <span>•</span>
+                <span>WEBM</span>
+                <span>•</span>
+                <span>AVI</span>
+                <span>•</span>
+                <span>MKV</span>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Bottom Hardware Control Bar */}
         <div className="flex h-11 items-center justify-between px-3 border-t border-border bg-card">
           <div className="flex items-center gap-3">
             <button
-              onClick={() => setIsPlaying(!isPlaying)}
-              className="text-muted-foreground hover:text-foreground transition-colors"
+              onClick={onPlayPause}
+              disabled={!videoUrl}
+              className="text-muted-foreground hover:text-foreground transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              aria-label={isPlaying ? 'Pause' : 'Play'}
             >
               {isPlaying ? <Pause className="size-4" /> : <Play className="size-4" />}
             </button>
             <span className="font-mono text-xs text-muted-foreground">
-              01:14:03 / 02:41:57
+              {formatTime(currentTime)} / {formatTime(duration)}
             </span>
           </div>
 
           <div className="flex items-center gap-3 text-muted-foreground">
-            <button className="hover:text-foreground transition-colors">
-              <Volume2 className="size-4" />
+            <button
+              onClick={() => setIsMuted(!isMuted)}
+              disabled={!videoUrl}
+              className="hover:text-foreground transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              aria-label={isMuted ? 'Unmute' : 'Mute'}
+            >
+              {isMuted ? <VolumeX className="size-4" /> : <Volume2 className="size-4" />}
             </button>
-            <button className="hover:text-foreground transition-colors">
+            <button
+              onClick={handleToggleFullscreen}
+              disabled={!videoUrl}
+              className="hover:text-foreground transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              aria-label="Fullscreen"
+            >
               <Maximize2 className="size-4" />
             </button>
           </div>
         </div>
       </div>
 
-      {/* Timeline Controls - Sharp container with strict alignment */}
-      <div className="flex flex-col gap-2 rounded border border-border bg-card p-3">
+      {/* Timeline Controls */}
+      <div className="flex flex-col gap-2 rounded-lg border border-border bg-card p-3 shadow-lg">
         <div className="flex items-center justify-between">
           <span className="font-mono text-[10px] tracking-widest text-muted-foreground uppercase">
             Timeline Index
           </span>
           <span className="font-mono text-[10px] text-muted-foreground">
-            {markers.length} EVENTS FLAGGED
+            {`${markers.length} ${markers.length === 1 ? 'EVENT FLAGGED' : 'EVENTS FLAGGED'}`}
           </span>
         </div>
 
-        <div className="relative py-2 cursor-pointer">
-          <div className="relative h-1.5 w-full rounded-full bg-secondary overflow-hidden">
+        <div className="relative py-2.5 select-none">
+          {/* Progress Track */}
+          <div className="relative h-2 w-full rounded-full bg-secondary overflow-hidden border border-border/40">
             <div
-              className="absolute top-0 left-0 h-full bg-primary/50"
+              className="absolute top-0 left-0 h-full bg-primary/60 transition-[width] duration-75"
               style={{ width: `${progressPercent}%` }}
             />
           </div>
 
+          {/* Interactive Range Input */}
           <input
             type="range"
             min={0}
-            max={totalDuration}
+            max={duration > 0 ? duration : 100}
+            step={0.1}
             value={currentTime}
-            onChange={(e) => setCurrentTime(Number(e.target.value))}
-            className="absolute inset-0 opacity-0 cursor-pointer w-full h-full z-20"
+            disabled={!videoUrl}
+            onChange={(e) => {
+              const val = Number(e.target.value)
+              onSeek(val)
+            }}
+            className="absolute inset-0 opacity-0 cursor-pointer w-full h-full z-20 disabled:cursor-not-allowed"
+            aria-label="Video timeline scrub"
           />
 
-          <div
-            className="absolute top-1/2 -translate-y-1/2 size-3 -ml-1.5 rounded-full bg-foreground border border-primary pointer-events-none z-10"
-            style={{ left: `${progressPercent}%` }}
-          />
+          {/* Playhead Indicator */}
+          {videoUrl && (
+            <div
+              className="absolute top-1/2 -translate-y-1/2 size-3.5 -ml-[7px] rounded-full bg-foreground border-2 border-primary pointer-events-none z-10 shadow-[0_0_8px_var(--primary)]"
+              style={{ left: `${progressPercent}%` }}
+            />
+          )}
 
+          {/* Flagged Markers */}
           {markers.map((marker) => {
             const isActive = activeMarkerId === marker.id
+            const pos = duration > 0 ? (marker.seconds / duration) * 100 : marker.position
             return (
               <button
                 key={marker.id}
                 type="button"
-                onClick={() => {
-                  onScrub(marker.id)
-                  setCurrentTime((marker.position / 100) * totalDuration)
+                onClick={(e) => {
+                  e.stopPropagation()
+                  onSelectMarker(marker.id, marker.seconds)
                 }}
-                style={{ left: `${marker.position}%` }}
+                style={{ left: `${Math.max(1, Math.min(99, pos))}%` }}
                 className={cn(
-                  'absolute top-1/2 size-2.5 -translate-x-1/2 -translate-y-1/2 rounded-full border transition-all hover:scale-125 z-10',
-                  marker.color === 'primary' ? 'bg-primary border-primary' : 'bg-slate-700 border-slate-500',
-                  isActive ? 'ring-1 ring-primary ring-offset-2 ring-offset-background scale-125' : 'opacity-60'
+                  'absolute top-1/2 size-3 -translate-x-1/2 -translate-y-1/2 rounded-full border transition-all hover:scale-150 z-10 cursor-pointer',
+                  marker.color === 'primary'
+                    ? 'bg-emerald-500 border-emerald-300 shadow-[0_0_8px_rgba(16,185,129,0.8)]'
+                    : marker.color === 'destructive'
+                    ? 'bg-red-500 border-red-300 shadow-[0_0_8px_rgba(239,68,68,0.8)]'
+                    : 'bg-amber-500 border-amber-300 shadow-[0_0_8px_rgba(245,158,11,0.8)]',
+                  isActive
+                    ? 'ring-2 ring-primary ring-offset-2 ring-offset-background scale-150 z-20'
+                    : 'opacity-90'
                 )}
-                title={marker.label}
+                title={`${marker.label} (${formatTime(marker.seconds)})`}
               />
             )
           })}
