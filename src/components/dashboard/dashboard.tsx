@@ -72,16 +72,18 @@ export function Dashboard() {
     setCurrentTime(seconds)
   }, [])
 
-  // Handle Timeline Marker Click
+  // Handle Timeline Marker Click - Seek & Resume Active Continuous Playback
   const handleSelectMarker = useCallback((id: string, seconds: number) => {
     setActiveMatchId(id)
     setCurrentTime(seconds)
+    setIsPlaying(true)
   }, [])
 
-  // Handle Audit Result Card Click
+  // Handle Audit Result Card Click - Seek & Resume Active Continuous Playback
   const handleSelectMatch = useCallback((id: string, startSeconds: number) => {
     setActiveMatchId(id)
     setCurrentTime(startSeconds)
+    setIsPlaying(true)
   }, [])
 
   // Handle Video Play / Pause Toggle

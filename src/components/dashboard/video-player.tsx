@@ -52,23 +52,35 @@ export function VideoPlayer({
   const [isMuted, setIsMuted] = useState(false)
   const [isDragging, setIsDragging] = useState(false)
 
-  // Synchronize play/pause with external state
+  // Synchronize playback and seeking with native HTML5 video
   useEffect(() => {
-    if (!videoRef.current) return
+    const video = videoRef.current
+    if (!video) return
+
     if (isPlaying) {
-      videoRef.current.play().catch(() => {})
+      const playPromise = video.play()
+      if (playPromise !== undefined) {
+        playPromise.catch((err) => {
+          console.warn('Playback resume handled:', err)
+        })
+      }
     } else {
-      videoRef.current.pause()
+      video.pause()
     }
   }, [isPlaying])
 
-  // Synchronize seek position when currentTime changes externally by more than 0.5s
+  // Synchronize external timestamp seeking and maintain smooth continuous playback
   useEffect(() => {
-    if (!videoRef.current) return
-    if (Math.abs(videoRef.current.currentTime - currentTime) > 0.6) {
-      videoRef.current.currentTime = currentTime
+    const video = videoRef.current
+    if (!video) return
+
+    if (Math.abs(video.currentTime - currentTime) > 0.4) {
+      video.currentTime = currentTime
+      if (isPlaying) {
+        video.play().catch(() => {})
+      }
     }
-  }, [currentTime])
+  }, [currentTime, isPlaying])
 
   const handleDragOver = (e: DragEvent<HTMLDivElement>) => {
     e.preventDefault()
@@ -110,25 +122,25 @@ export function VideoPlayer({
     <div className="flex flex-col gap-3">
       {/* Screen Viewport Frame */}
       <div className="relative flex flex-col rounded-lg border border-border bg-[#05070a] overflow-hidden shadow-2xl">
-        {/* Top HUD Telemetry Overlay */}
-        <div className="absolute top-3 left-3 z-20 flex items-center gap-2">
+        {/* Top HUD Telemetry Overlay (pointer-events: none so it never intercepts user clicks) */}
+        <div className="pointer-events-none absolute top-3 left-3 z-20 flex items-center gap-2">
           {videoUrl ? (
             <span className="flex items-center gap-2 rounded bg-black/85 px-2.5 py-1 font-mono text-[11px] text-red-400 border border-red-500/40 backdrop-blur-md">
-              <span className="size-1.5 rounded-full bg-red-500 animate-pulse" />
-              LIVE // {videoName ? videoName.slice(0, 18) : 'CAM-01'}
+              <span className={cn("size-1.5 rounded-full bg-red-500", isPlaying ? "animate-pulse" : "opacity-80")} />
+              {`${isPlaying ? 'LIVE STREAM' : 'PAUSED'} // ${videoName ? videoName.slice(0, 18) : 'CAM-01'}`}
             </span>
           ) : (
             <span className="flex items-center gap-2 rounded bg-black/85 px-2.5 py-1 font-mono text-[11px] text-muted-foreground border border-border backdrop-blur-md">
               <Radio className="size-3 text-muted-foreground" />
-              STANDBY // NO FEED
+              {'STANDBY // NO FEED'}
             </span>
           )}
         </div>
 
-        <div className="absolute top-3 right-3 z-20 flex items-center gap-2">
+        <div className="pointer-events-none absolute top-3 right-3 z-20 flex items-center gap-2">
           {videoUrl ? (
             <span className="flex items-center gap-1.5 rounded bg-black/85 px-2.5 py-1 font-mono text-[11px] text-primary border border-primary/40 backdrop-blur-md">
-              AI_TRACKING: READY
+              AI_TRACKING: {isPlaying ? 'STREAMING' : 'READY'}
             </span>
           ) : (
             <span className="flex items-center gap-1.5 rounded bg-black/85 px-2.5 py-1 font-mono text-[11px] text-muted-foreground border border-border backdrop-blur-md">
@@ -140,7 +152,7 @@ export function VideoPlayer({
         {/* Video Viewport / Empty State Dropzone */}
         <div className="relative aspect-video w-full flex items-center justify-center bg-[#020305] overflow-hidden">
           {/* Engineering grid blueprint overlay */}
-          <div className="absolute inset-0 bg-[linear-gradient(to_right,#1a223015_1px,transparent_1px),linear-gradient(to_bottom,#1a223015_1px,transparent_1px)] bg-[size:2.5rem_2.5rem] pointer-events-none" />
+          <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(to_right,#1a223015_1px,transparent_1px),linear-gradient(to_bottom,#1a223015_1px,transparent_1px)] bg-[size:2.5rem_2.5rem]" />
 
           {videoUrl ? (
             <>
@@ -148,6 +160,7 @@ export function VideoPlayer({
                 ref={videoRef}
                 src={videoUrl}
                 playsInline
+                controls={false}
                 muted={isMuted}
                 onTimeUpdate={(e) => {
                   const curr = e.currentTarget.currentTime
@@ -160,24 +173,25 @@ export function VideoPlayer({
                 onEnded={() => {
                   if (isPlaying) onPlayPause()
                 }}
-                className="h-full w-full object-contain"
+                className="h-full w-full object-contain cursor-pointer"
                 onClick={onPlayPause}
               />
 
-              {/* Central Play Overlay Button on hover/pause */}
+              {/* Central Play Overlay Trigger on pause */}
               {!isPlaying && (
                 <button
+                  type="button"
                   onClick={onPlayPause}
-                  className="group absolute z-10 flex size-14 items-center justify-center rounded-full bg-primary/20 border border-primary/60 text-primary transition-all hover:scale-110 hover:bg-primary/30 active:scale-95 shadow-[0_0_25px_rgba(16,185,129,0.4)]"
+                  className="group absolute z-10 flex size-14 items-center justify-center rounded-full bg-primary/20 border border-primary/60 text-primary transition-all hover:scale-110 hover:bg-primary/30 active:scale-95 shadow-[0_0_25px_rgba(16,185,129,0.4)] cursor-pointer"
                   aria-label="Play Video"
                 >
                   <Play className="size-6 translate-x-0.5 fill-primary/30" />
                 </button>
               )}
 
-              {/* Bottom Video HUD Overlay */}
-              <div className="absolute bottom-3 left-3 z-10 font-mono text-[10px] text-slate-400/80 tracking-widest bg-black/70 px-2 py-0.5 rounded border border-border/50">
-                FRAME_LOCK: SYNCED // DURATION: {formatTime(duration)}
+              {/* Bottom Video HUD Overlay (pointer-events: none, non-blocking telemetry) */}
+              <div className="pointer-events-none absolute bottom-3 left-3 z-10 font-mono text-[10px] text-slate-400/80 tracking-widest bg-black/70 px-2 py-0.5 rounded border border-border/50">
+                {`${isPlaying ? 'ACTIVE_PLAYBACK // 1.0X' : 'SEEK_SYNC: READY'} // DURATION: ${formatTime(duration)}`}
               </div>
             </>
           ) : (
@@ -241,7 +255,7 @@ export function VideoPlayer({
             <button
               onClick={onPlayPause}
               disabled={!videoUrl}
-              className="text-muted-foreground hover:text-foreground transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              className="text-muted-foreground hover:text-foreground transition-colors disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
               aria-label={isPlaying ? 'Pause' : 'Play'}
             >
               {isPlaying ? <Pause className="size-4" /> : <Play className="size-4" />}
@@ -255,7 +269,7 @@ export function VideoPlayer({
             <button
               onClick={() => setIsMuted(!isMuted)}
               disabled={!videoUrl}
-              className="hover:text-foreground transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              className="hover:text-foreground transition-colors disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
               aria-label={isMuted ? 'Unmute' : 'Mute'}
             >
               {isMuted ? <VolumeX className="size-4" /> : <Volume2 className="size-4" />}
@@ -263,7 +277,7 @@ export function VideoPlayer({
             <button
               onClick={handleToggleFullscreen}
               disabled={!videoUrl}
-              className="hover:text-foreground transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              className="hover:text-foreground transition-colors disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
               aria-label="Fullscreen"
             >
               <Maximize2 className="size-4" />
