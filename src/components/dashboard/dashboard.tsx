@@ -15,7 +15,6 @@ export function Dashboard() {
   const [videoDuration, setVideoDuration] = useState<number>(0)
   const [currentTime, setCurrentTime] = useState<number>(0)
   const [isPlaying, setIsPlaying] = useState<boolean>(false)
-
   const [matches, setMatches] = useState<AuditMatch[]>([])
   const [markers, setMarkers] = useState<TimelineMarker[]>([])
   const [activeMatchId, setActiveMatchId] = useState<string | null>(null)
@@ -105,86 +104,90 @@ export function Dashboard() {
     })
   }, [])
 
-  // Execute Scalable Multi-Minute Video Analysis Pipeline
+  // Execute Video Analysis Pipeline
   const handleAnalyze = async (query: string) => {
-    if (!videoFile && !videoUrl) return
+    if (!videoFile && !videoUrl) {
+      alert('Please upload a video file first.')
+      return
+    }
 
     setIsProcessing(true)
     const abortController = new AbortController()
     abortControllerRef.current = abortController
 
+    let uploadTimer: NodeJS.Timeout | null = null
+    let extractTimer: NodeJS.Timeout | null = null
+
     try {
       const dur = videoDuration || 120
-      const totalSteps = Math.max(2, Math.ceil(dur / 60))
 
-      // Phase 1: Uploading Footage Progress
+      // Step 1: UI Progress updates
       setProgress({
         status: 'uploading',
-        progress: 15,
-        message: `Uploading footage (${videoFile ? (videoFile.size / (1024 * 1024)).toFixed(1) : '0'} MB) with streaming spooling...`,
+        progress: 20,
+        message: `Uploading footage (${videoFile ? (videoFile.size / (1024 * 1024)).toFixed(1) : '0'} MB)...`,
       })
 
-      const uploadTimer = setTimeout(() => {
-        if (!abortController.signal.aborted) {
-          setProgress({
-            status: 'uploading',
-            progress: 35,
-            message: 'Streaming chunks to disk spool (/tmp/video_audit/)...',
-          })
-        }
-      }, 500)
-
-      const extractTimer = setTimeout(() => {
+      uploadTimer = setTimeout(() => {
         if (!abortController.signal.aborted) {
           setProgress({
             status: 'extracting',
             progress: 50,
-            message: `Extracting keyframes (1 fps) across ${totalSteps} segment(s) with JPEG downsampling...`,
-            totalSegments: totalSteps,
+            message: 'Extracting video frames via FFmpeg...',
           })
         }
-      }, 1000)
+      }, 600)
 
-      const analyzeTimer = setTimeout(() => {
+      extractTimer = setTimeout(() => {
         if (!abortController.signal.aborted) {
           setProgress({
             status: 'analyzing',
             progress: 75,
-            message: `Analyzing segment 1 of ${totalSteps} (Motion delta filter active)...`,
-            currentSegment: 1,
-            totalSegments: totalSteps,
+            message: 'Multimodal AI analyzing visual patterns...',
           })
         }
-      }, 1600)
+      }, 1500)
 
-      const formData = new FormData()
-      if (videoFile) {
-        formData.append('file', videoFile)
+      // Ensure a valid binary File exists
+      let fileToSend = videoFile
+      if (!fileToSend && videoUrl) {
+        const blobRes = await fetch(videoUrl)
+        const blob = await blobRes.blob()
+        fileToSend = new File([blob], 'footage.mp4', { type: blob.type || 'video/mp4' })
       }
-      formData.append('query', query)
-      formData.append('duration', String(dur))
-      formData.append('fileName', videoFile?.name || 'surveillance_feed.mp4')
 
-      // Fetch with extended 300,000ms (5 minutes) timeout window
+      if (!fileToSend) {
+        throw new Error('No valid video file could be prepared for analysis.')
+      }
+
+      // Build payload containing expected keys
+      const formData = new FormData()
+      formData.append('video', fileToSend)
+      formData.append('file', fileToSend) // Fallback alias
+      formData.append('query', query)
+      formData.append('duration', dur.toString())
+      formData.append('fileName', fileToSend.name)
+
+      // Send to Next.js API Route
       const response = await fetch('/api/analyze', {
         method: 'POST',
         body: formData,
         signal: abortController.signal,
       })
 
-      clearTimeout(uploadTimer)
-      clearTimeout(extractTimer)
-      clearTimeout(analyzeTimer)
+      if (uploadTimer) clearTimeout(uploadTimer)
+      if (extractTimer) clearTimeout(extractTimer)
 
       if (!response.ok) {
-        throw new Error(`Server returned ${response.status}: ${response.statusText}`)
+        const errJson = await response.json().catch(() => ({}))
+        throw new Error(errJson.error || `Server returned ${response.status}: ${response.statusText}`)
       }
 
       const data: AuditResponse = await response.json()
       const returnedMatches: AuditMatch[] = data.matches || []
 
-      // Generate Timeline Markers from returned Matches
-      const totalDur = videoDuration || data.video_duration || 120
+      // Generate visual timeline markers
+      const totalDur = videoDuration || data.video_duration || dur
       const generatedMarkers: TimelineMarker[] = returnedMatches.map((m) => {
         const cat = (m.category || 'ANOMALY').toUpperCase()
         let color: 'primary' | 'accent' | 'destructive' = 'primary'
@@ -216,13 +219,17 @@ export function Dashboard() {
       if (err instanceof Error && err.name === 'AbortError') {
         return
       }
+      const message = err instanceof Error ? err.message : 'Analysis failed. Please verify video format and retry.'
       console.error('Audit analysis failed:', err)
       setProgress({
         status: 'error',
         progress: 0,
-        message: 'Analysis failed or timed out. Please verify video format and retry.',
+        message,
       })
+      alert(message)
     } finally {
+      if (uploadTimer) clearTimeout(uploadTimer)
+      if (extractTimer) clearTimeout(extractTimer)
       setIsProcessing(false)
       abortControllerRef.current = null
     }
