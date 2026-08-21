@@ -84,7 +84,7 @@ export default function LandingPage() {
 
       {/* Footer */}
       <footer className="border-t border-border py-6 text-center text-xs font-mono text-muted-foreground">
-        Sentinel CCTV Audit Engine — Built for Smart India Hackathon 2026
+        TraceVision CCTV Audit Engine — Built for Smart India Hackathon 2026
       </footer>
     </div>
   )

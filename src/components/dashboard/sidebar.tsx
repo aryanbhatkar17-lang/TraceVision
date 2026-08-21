@@ -1,18 +1,21 @@
 'use client'
 
 import { useState } from 'react'
+import Link from 'next/link'
+import { usePathname } from 'next/navigation'
 import { LayoutDashboard, History, Shield, Settings, PanelLeftClose, PanelLeftOpen } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 const navItems = [
-  { label: 'Dashboard', icon: LayoutDashboard, href: '#', active: true },
-  { label: 'Audit History', icon: History, href: '#' },
-  { label: 'Evidence Locker', icon: Shield, href: '#' },
-  { label: 'System Settings', icon: Settings, href: '#' },
+  { label: 'Dashboard', icon: LayoutDashboard, href: '/dashboard' },
+  { label: 'Audit History', icon: History, href: '/dashboard/history' },
+  { label: 'Evidence Locker', icon: Shield, href: '/dashboard/evidence' },
+  { label: 'System Settings', icon: Settings, href: '/dashboard/settings' },
 ]
 
 export function Sidebar() {
   const [isCollapsed, setIsCollapsed] = useState(false)
+  const pathname = usePathname()
 
   return (
     <aside
@@ -21,40 +24,48 @@ export function Sidebar() {
         isCollapsed ? 'w-20' : 'w-64'
       )}
     >
-      {/* Brand Header */}
-      <div className="flex h-16 items-center gap-3 px-6 border-b border-border overflow-hidden">
-        <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 border border-primary/20 text-primary">
-          <Shield className="size-4" />
-        </div>
-        {!isCollapsed && (
-          <div className="flex flex-col truncate">
-            <span className="font-bold tracking-wider text-sm">SENTINEL</span>
-            <span className="text-[10px] tracking-widest text-muted-foreground uppercase font-mono">
-              Audit Console
-            </span>
+      {/* Brand Header - Links back to Landing Page */}
+      <div className="flex h-16 items-center px-4 border-b border-border overflow-hidden">
+        <Link
+          href="/"
+          className="flex items-center gap-3 w-full rounded-lg p-1.5 hover:bg-secondary/60 transition-colors"
+          title="Return to Home"
+        >
+          <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 border border-primary/20 text-primary">
+            <Shield className="size-4" />
           </div>
-        )}
+          {!isCollapsed && (
+            <div className="flex flex-col truncate">
+              <span className="font-bold tracking-wider text-sm leading-none">TraceVision</span>
+              <span className="text-[10px] tracking-widest text-muted-foreground uppercase font-mono mt-1">
+                Audit Console
+              </span>
+            </div>
+          )}
+        </Link>
       </div>
 
-      {/* Navigation Links */}
+      {/* Navigation Links with Next.js Client Routing */}
       <nav className="flex-1 space-y-1.5 p-3">
         {navItems.map((item) => {
           const Icon = item.icon
+          const isActive = pathname === item.href
+
           return (
-            <a
+            <Link
               key={item.label}
               href={item.href}
               className={cn(
                 'flex items-center gap-3 rounded-lg px-3.5 py-2.5 text-sm font-medium transition-colors',
-                item.active
-                  ? 'bg-primary/10 text-primary border border-primary/20'
-                  : 'text-muted-foreground hover:bg-secondary hover:text-foreground'
+                isActive
+                  ? 'bg-primary/10 text-primary border border-primary/20 font-semibold'
+                  : 'text-muted-foreground hover:bg-secondary hover:text-foreground border border-transparent'
               )}
               title={isCollapsed ? item.label : undefined}
             >
               <Icon className="size-4 shrink-0" />
               {!isCollapsed && <span className="truncate">{item.label}</span>}
-            </a>
+            </Link>
           )
         })}
       </nav>
