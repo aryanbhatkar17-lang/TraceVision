@@ -1,15 +1,29 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { AuditMatch, AuditResponse } from '@/types/audit'
 import { extractFrames } from '@/lib/ffmpeg'
-import { GoogleGenAI, Type, Schema } from '@google/genai'
+
+type Schema = {
+  type: string
+  properties?: Record<string, Schema>
+  items?: Schema
+  required?: string[]
+  description?: string
+}
+
+type RawMatch = {
+  start_seconds: number
+  end_seconds: number
+  category?: string
+  description: string
+  confidence?: number
+}
+
 import path from 'path'
 import fs from 'fs/promises'
 import os from 'os'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 300 // 5-minute timeout window for processing
-
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY })
 
 function formatSeconds(sec: number): string {
   const hrs = Math.floor(sec / 3600)
@@ -72,9 +86,8 @@ export async function POST(req: NextRequest) {
     const sampledPaths = framePaths.filter((_, idx) => idx % step === 0)
 
     const imageParts = await Promise.all(
-      sampledPaths.map(async (fPath, index) => {
+      sampledPaths.map(async (fPath) => {
         const frameBuffer = await fs.readFile(fPath)
-        const frameSecond = index * step
         return {
           inlineData: {
             data: frameBuffer.toString('base64'),
@@ -86,25 +99,25 @@ export async function POST(req: NextRequest) {
 
     // 4. Define structured output schema
     const auditSchema: Schema = {
-      type: Type.OBJECT,
+      type: 'OBJECT',
       properties: {
         matches: {
-          type: Type.ARRAY,
+          type: 'ARRAY',
           items: {
-            type: Type.OBJECT,
+            type: 'OBJECT',
             properties: {
-              start_seconds: { type: Type.NUMBER },
-              end_seconds: { type: Type.NUMBER },
+              start_seconds: { type: 'NUMBER' },
+              end_seconds: { type: 'NUMBER' },
               category: {
-                type: Type.STRING,
+                type: 'STRING',
                 description: 'PERSON, VEHICLE, OBJECT, SECURITY, or ANOMALY',
               },
               description: {
-                type: Type.STRING,
+                type: 'STRING',
                 description: 'Accurate description of what is occurring in the frame interval.',
               },
               confidence: {
-                type: Type.NUMBER,
+                type: 'NUMBER',
                 description: 'Confidence between 0.0 and 1.0 based strictly on visual clarity.',
               },
             },
@@ -116,12 +129,7 @@ export async function POST(req: NextRequest) {
     }
 
     // 5. Run Vision Model Inference
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.6-flash',
-      contents: [
-        ...imageParts,
-        {
-          text: `You are an automated CCTV Video Surveillance Audit Engine.
+    const prompt = `You are an automated CCTV Video Surveillance Audit Engine.
 The provided sequential images are sampled at exactly 1 frame every ${step} second(s) from a ${duration || framePaths.length}-second CCTV recording.
 - Image index 0 corresponds to approximately 0 seconds.
 - Image index i corresponds to timestamp (i * ${step}) seconds.
@@ -132,19 +140,38 @@ Strict Instructions:
 1. Examine each frame carefully for the presence of the query target.
 2. If the target is NOT visible in a time window, do NOT create an entry for it.
 3. Identify continuous time windows (start_seconds to end_seconds) where the target appears.
-4. Output valid JSON adhering strictly to the response schema.`,
-        },
-      ],
-      config: {
-        responseMimeType: 'application/json',
-        responseSchema: auditSchema,
-      },
-    })
+4. Output valid JSON adhering strictly to the response schema.`
 
-    const parsed = JSON.parse(response.text || '{"matches":[]}')
+    const geminiResponse = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [...imageParts, { text: prompt }] }],
+          generationConfig: {
+            responseMimeType: 'application/json',
+            responseSchema: auditSchema,
+          },
+        }),
+      }
+    )
+
+    if (!geminiResponse.ok) {
+      throw new Error(`Gemini API request failed (${geminiResponse.status}): ${await geminiResponse.text()}`)
+    }
+
+    const response = (await geminiResponse.json()) as {
+      candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>
+    }
+    const responseText = response.candidates?.[0]?.content?.parts
+      ?.map((part) => part.text || '')
+      .join('')
+
+    const parsed = JSON.parse(responseText || '{"matches":[]}')
     const rawMatches = parsed.matches || []
 
-    const formattedMatches: AuditMatch[] = rawMatches.map((m: any, index: number) => ({
+    const formattedMatches: AuditMatch[] = rawMatches.map((m: RawMatch, index: number) => ({
       id: `match-${index + 1}`,
       start_time: formatSeconds(m.start_seconds),
       end_time: formatSeconds(m.end_seconds),

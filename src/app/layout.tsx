@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 })
 
 export const metadata: Metadata = {
-  title: 'Sentinel — AI CCTV Video Summarizer',
+  title: 'TraceVision — AI CCTV Video Summarizer',
   description:
     'AI-powered CCTV video summarization and forensic audit tool for security operations teams.',
   generator: 'v0.app',
@@ -26,7 +26,7 @@ export const metadata: Metadata = {
       },
       {
         url: '/icon-dark-32x32.png',
-        media: '(prefers-color-scheme: dark)',
+        media: '(prefers-color-scheme: light)',
       },
       {
         url: '/icon.svg',
@@ -38,13 +38,10 @@ export const metadata: Metadata = {
 }
 
 export const viewport: Viewport = {
-  colorScheme: 'dark',
-  themeColor: '#232b37',
-  //ios-zoom fix
+  colorScheme: 'light',
+  themeColor: '#ffffff',
   width: 'device-width',
   initialScale: 1,
-  maximumScale: 1,
-  userScalable: false,
 }
 
 export default function RootLayout({
@@ -53,7 +50,7 @@ export default function RootLayout({
   children: React.ReactNode
 }>) {
   return (
-    <html lang="en" className="dark bg-background">
+    <html lang="en" className="bg-background">
       <body
         className={`${geistSans.variable} ${geistMono.variable} font-sans antialiased`}
       >

@@ -1,61 +1,61 @@
 @import "tailwindcss";
 
 @theme {
-  --color-background: #050505;
-  --color-foreground: #E2E8F0;
+  --color-background: #F4F6FB;
+  --color-foreground: #0F172A;
   
-  --color-card: #0A0A0C;
-  --color-card-foreground: #E2E8F0;
+  --color-card: #FFFFFF;
+  --color-card-foreground: #0F172A;
   
-  --color-popover: #0A0A0C;
-  --color-popover-foreground: #E2E8F0;
+  --color-popover: #FFFFFF;
+  --color-popover-foreground: #0F172A;
   
-  --color-primary: #10B981;
-  --color-primary-foreground: #050505;
+  /* Electric Indigo for main actions & active states */
+  --color-primary: #4F46E5;
+  --color-primary-foreground: #FFFFFF;
   
-  --color-secondary: #121316;
-  --color-secondary-foreground: #E2E8F0;
+  /* Soft indigo tint for highlighted containers & active sidebar links */
+  --color-secondary: #EEF2FF;
+  --color-secondary-foreground: #4338CA;
   
-  --color-muted: #121316;
+  --color-muted: #F1F5F9;
   --color-muted-foreground: #64748B;
   
-  --color-accent: #10B981;
-  --color-accent-foreground: #050505;
+  /* Vibrant Cyan/Sky for telemetry and status highlights */
+  --color-accent: #E0F2FE;
+  --color-accent-foreground: #0284C7;
   
-  --color-destructive: #F59E0B;
-  --color-destructive-foreground: #050505;
+  --color-destructive: #EF4444;
+  --color-destructive-foreground: #FFFFFF;
   
-  --color-border: #1F242D;
-  --color-input: #1F242D;
-  --color-ring: #10B981;
+  --color-border: #E2E8F0;
+  --color-input: #E2E8F0;
+  --color-ring: #6366F1;
   
-  --radius: 0.25rem;
+  --radius: 0.5rem;
 }
 
 @layer utilities {
   .scrollbar-thin::-webkit-scrollbar {
-    width: 4px;
-    height: 4px;
+    width: 6px;
+    height: 6px;
   }
   .scrollbar-thin::-webkit-scrollbar-track {
     background: transparent;
   }
   .scrollbar-thin::-webkit-scrollbar-thumb {
-    background: #1F242D;
-    border-radius: 2px;
+    background: #CBD5E1;
+    border-radius: 3px;
   }
   
-  /* Cyber-Noir CRT Scanlines and Matrix Glow */
-  .crt-scanlines {
-    background: linear-gradient(
-      rgba(18, 16, 16, 0) 50%, 
-      rgba(0, 0, 0, 0.25) 50%
-    );
-    background-size: 100% 4px;
+  /* Vibrant CTA Gradient for Primary Buttons */
+  .btn-gradient {
+    background: linear-gradient(135deg, #4F46E5 0%, #2563EB 50%, #0284C7 100%);
   }
-  
-  .matrix-glow {
-    box-shadow: 0 0 20px -5px rgba(16, 185, 129, 0.2);
+
+  /* Soft modern card elevation */
+  .card-elevation {
+    box-shadow: 0 4px 20px -2px rgba(15, 23, 42, 0.05);
   }
 }
 
