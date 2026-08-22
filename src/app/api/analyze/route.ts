@@ -6,6 +6,25 @@ import path from 'path'
 import fs from 'fs/promises'
 import os from 'os'
 
+// Type guard for validating Gemini response structure
+interface GeminiMatch {
+  start_seconds?: number
+  end_seconds?: number
+  category?: string
+  description?: string
+  confidence?: number
+}
+
+function isValidGeminiMatch(match: unknown): match is GeminiMatch {
+  if (typeof match !== 'object' || match === null) return false
+  const m = match as Record<string, unknown>
+  return (
+    typeof m.start_seconds === 'number' &&
+    typeof m.end_seconds === 'number' &&
+    typeof m.description === 'string'
+  )
+}
+
 export const dynamic = 'force-dynamic'
 export const maxDuration = 300 // 5-minute timeout window for processing
 
@@ -142,19 +161,21 @@ Strict Instructions:
     })
 
     const parsed = JSON.parse(response.text || '{"matches":[]}')
-    const rawMatches = parsed.matches || []
+    const rawMatches: unknown[] = parsed.matches || []
 
-    const formattedMatches: AuditMatch[] = rawMatches.map((m: any, index: number) => ({
-      id: `match-${index + 1}`,
-      start_time: formatSeconds(m.start_seconds),
-      end_time: formatSeconds(m.end_seconds),
-      start_seconds: Math.round(m.start_seconds),
-      end_seconds: Math.round(m.end_seconds),
-      category: m.category || 'PERSON',
-      description: m.description,
-      confidence: Number(m.confidence?.toFixed(2)) || 0.9,
-      chunk_id: `chunk_${String(index + 1).padStart(3, '0')}`,
-    }))
+    const formattedMatches: AuditMatch[] = rawMatches
+      .filter(isValidGeminiMatch)
+      .map((m, index) => ({
+        id: `match-${index + 1}`,
+        start_time: formatSeconds(m.start_seconds!),
+        end_time: formatSeconds(m.end_seconds!),
+        start_seconds: Math.round(m.start_seconds!),
+        end_seconds: Math.round(m.end_seconds!),
+        category: m.category || 'PERSON',
+        description: m.description!,
+        confidence: typeof m.confidence === 'number' ? Number(m.confidence.toFixed(2)) : 0.9,
+        chunk_id: `chunk_${String(index + 1).padStart(3, '0')}`,
+      }))
 
     const responsePayload: AuditResponse = {
       matches: formattedMatches,
