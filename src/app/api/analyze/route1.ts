@@ -22,9 +22,19 @@ import path from 'path'
 import fs from 'fs/promises'
 import os from 'os'
 
+// Next.js Route Segment Configuration:
+// 1. Force dynamic execution for every audit request (no caching)
+// 2. Extend timeout window to 300 seconds (5 minutes) for processing video files
 export const dynamic = 'force-dynamic'
-export const maxDuration = 300 // 5-minute timeout window for processing
+export const maxDuration = 300
 
+// Initialize Google Gemini Client with the API key configured in .env.local
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY })
+
+/**
+ * Utility: Converts numeric seconds into standardized MM:SS or HH:MM:SS format
+ * Example: 75 -> "01:15", 3665 -> "01:01:05"
+ */
 function formatSeconds(sec: number): string {
   const hrs = Math.floor(sec / 3600)
   const mins = Math.floor((sec % 3600) / 60)
@@ -36,14 +46,18 @@ function formatSeconds(sec: number): string {
 }
 
 export async function POST(req: NextRequest) {
-  let tempDir = ''
+  let tempDir = '' // Tracked for reliable disk cleanup in the finally block
 
   try {
+    // -------------------------------------------------------------
+    // STEP 1: Parse Incoming Multipart Form Data from the Frontend
+    // -------------------------------------------------------------
     const formData = await req.formData()
     const videoFile = (formData.get('video') || formData.get('file')) as File | null
     const query = (formData.get('query') as string) || ''
     const duration = parseFloat((formData.get('duration') as string) || '0')
 
+    // Validate that a video file was actually provided
     if (!videoFile || typeof videoFile === 'string') {
       return NextResponse.json(
         { error: 'No video file provided for analysis.' },
@@ -51,6 +65,7 @@ export async function POST(req: NextRequest) {
       )
     }
 
+    // Validate Gemini API Key existence
     if (!process.env.GEMINI_API_KEY) {
       return NextResponse.json(
         { error: 'GEMINI_API_KEY is not set in .env.local' },
@@ -58,36 +73,67 @@ export async function POST(req: NextRequest) {
       )
     }
 
-    // 1. Create temporary directory and save video
+    // -------------------------------------------------------------
+    // STEP 2: Save Uploaded Video to OS Temporary Directory
+    // -------------------------------------------------------------
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cctv-audit-'))
     const videoFilePath = path.join(tempDir, 'input_feed.mp4')
     const framesOutputDir = path.join(tempDir, 'frames')
 
+    // Convert browser File object into a Node.js Buffer and write to local temp disk
     const fileBuffer = Buffer.from(await videoFile.arrayBuffer())
     await fs.writeFile(videoFilePath, fileBuffer)
 
-    // 2. Extract 1 frame per second using FFmpeg
-    const framePaths = await extractFrames({
+    // -------------------------------------------------------------
+    // STEP 3: Extract 1 Frame Per Second Using FFmpeg
+    // -------------------------------------------------------------
+    const rawFramePaths = await extractFrames({
       videoPath: videoFilePath,
       outputDir: framesOutputDir,
-      fps: 1,
+      fps: 1, // Samples 1 frame every 1 second
     })
 
-    if (framePaths.length === 0) {
+    if (rawFramePaths.length === 0) {
       throw new Error('FFmpeg was unable to extract frames from the uploaded video.')
     }
 
-    // Sort frames sequentially (frame_0001.jpg, frame_0002.jpg, ...)
-    framePaths.sort()
+    // Sort frames chronologically (e.g. frame_0001.jpg, frame_0002.jpg)
+    rawFramePaths.sort()
 
-    // 3. Prepare images for Gemini Multimodal API (sample up to 60 frames evenly if long)
+    // -------------------------------------------------------------
+    // STEP 4: Motion-Delta Filtering via Sharp + Pixelmatch
+    // -------------------------------------------------------------
+    // Drops static non-moving frames (< 3% pixel change) to save 60-80% of tokens & processing time
+    const activeFrames = await filterStaticFrames(rawFramePaths, 1, 0.03)
+
+    // Fallback: If camera scene is completely still, keep at least the initial reference frame
+    const framesToAnalyze =
+      activeFrames.length > 0
+        ? activeFrames
+        : [{ path: rawFramePaths[0], second: 0, motionDelta: 0 }]
+
+    const droppedPercentage = (
+      ((rawFramePaths.length - framesToAnalyze.length) / rawFramePaths.length) *
+      100
+    ).toFixed(1)
+
+    console.log(
+      `[Motion-Delta] Raw Frames: ${rawFramePaths.length} -> Active Motion Frames: ${framesToAnalyze.length} ` +
+      `(${droppedPercentage}% static non-moving frames discarded)`
+    )
+
+    // -------------------------------------------------------------
+    // STEP 5: Sample & Encode Active Frames to Base64 for Gemini
+    // -------------------------------------------------------------
+    // Cap at a max of 60 frames per API payload to stay well within Gemini Flash token windows
     const maxFrames = 60
-    const step = Math.max(1, Math.floor(framePaths.length / maxFrames))
-    const sampledPaths = framePaths.filter((_, idx) => idx % step === 0)
+    const step = Math.max(1, Math.floor(framesToAnalyze.length / maxFrames))
+    const sampledFrames = framesToAnalyze.filter((_, idx) => idx % step === 0)
 
+    // Convert each retained JPEG frame into Base64 inline data
     const imageParts = await Promise.all(
-      sampledPaths.map(async (fPath) => {
-        const frameBuffer = await fs.readFile(fPath)
+      sampledFrames.map(async (frame) => {
+        const frameBuffer = await fs.readFile(frame.path)
         return {
           inlineData: {
             data: frameBuffer.toString('base64'),
@@ -97,7 +143,15 @@ export async function POST(req: NextRequest) {
       })
     )
 
-    // 4. Define structured output schema
+    // Build an explicit timestamp index so Gemini maps each frame back to real video seconds
+    // e.g. "Frame 0: 0s, Frame 1: 10s, Frame 2: 12s, Frame 3: 25s"
+    const timestampsIndex = sampledFrames
+      .map((f, idx) => `Frame ${idx}: ${f.second}s`)
+      .join(', ')
+
+    // -------------------------------------------------------------
+    // STEP 6: Define Strict JSON Schema for Structured Incident Output
+    // -------------------------------------------------------------
     const auditSchema: Schema = {
       type: 'OBJECT',
       properties: {
@@ -106,8 +160,14 @@ export async function POST(req: NextRequest) {
           items: {
             type: 'OBJECT',
             properties: {
-              start_seconds: { type: 'NUMBER' },
-              end_seconds: { type: 'NUMBER' },
+              start_seconds: {
+                type: Type.NUMBER,
+                description: 'Exact starting timestamp second where the query target appears in the video.',
+              },
+              end_seconds: {
+                type: Type.NUMBER,
+                description: 'Exact ending timestamp second where the query target leaves the frame.',
+              },
               category: {
                 type: 'STRING',
                 description: 'PERSON, VEHICLE, OBJECT, SECURITY, or ANOMALY',
@@ -117,8 +177,8 @@ export async function POST(req: NextRequest) {
                 description: 'Accurate description of what is occurring in the frame interval.',
               },
               confidence: {
-                type: 'NUMBER',
-                description: 'Confidence between 0.0 and 1.0 based strictly on visual clarity.',
+                type: Type.NUMBER,
+                description: 'Confidence score between 0.0 and 1.0 based strictly on visual clarity.',
               },
             },
             required: ['start_seconds', 'end_seconds', 'category', 'description', 'confidence'],
@@ -128,11 +188,17 @@ export async function POST(req: NextRequest) {
       required: ['matches'],
     }
 
-    // 5. Run Vision Model Inference
-    const prompt = `You are an automated CCTV Video Surveillance Audit Engine.
-The provided sequential images are sampled at exactly 1 frame every ${step} second(s) from a ${duration || framePaths.length}-second CCTV recording.
-- Image index 0 corresponds to approximately 0 seconds.
-- Image index i corresponds to timestamp (i * ${step}) seconds.
+    // -------------------------------------------------------------
+    // STEP 7: Run Multimodal Vision Inference (Gemini 3.6 Flash)
+    // -------------------------------------------------------------
+    const response = await ai.models.generateContent({
+      model: 'gemini-3.6-flash',
+      contents: [
+        ...imageParts, // Pass all active image frames
+        {
+          text: `You are an automated CCTV Video Surveillance Audit Engine.
+The provided sequence contains ONLY frames where active visual motion was detected.
+Frame Timestamp Index: [ ${timestampsIndex} ]
 
 Target Audit Query: "${query}"
 
@@ -171,7 +237,10 @@ Strict Instructions:
     const parsed = JSON.parse(responseText || '{"matches":[]}')
     const rawMatches = parsed.matches || []
 
-    const formattedMatches: AuditMatch[] = rawMatches.map((m: RawMatch, index: number) => ({
+    // -------------------------------------------------------------
+    // STEP 8: Format Matches for the Frontend Dashboard & Timeline
+    // -------------------------------------------------------------
+    const formattedMatches: AuditMatch[] = rawMatches.map((m: any, index: number) => ({
       id: `match-${index + 1}`,
       start_time: formatSeconds(m.start_seconds),
       end_time: formatSeconds(m.end_seconds),
@@ -186,17 +255,21 @@ Strict Instructions:
     const responsePayload: AuditResponse = {
       matches: formattedMatches,
       total_chunks: 1,
-      video_duration: duration || framePaths.length,
+      video_duration: duration || rawFramePaths.length,
       query,
     }
 
+    // Return the formatted audit result back to the frontend
     return NextResponse.json(responsePayload)
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Unknown error during analysis'
     console.error('API /api/analyze error:', err)
     return NextResponse.json({ error: message }, { status: 500 })
   } finally {
-    // 6. Clean up temporary files
+    // -------------------------------------------------------------
+    // STEP 9: Clean Up Temporary Disk Files
+    // -------------------------------------------------------------
+    // Deletes temporary video files and extracted frames so local disk storage does not fill up
     if (tempDir) {
       await fs.rm(tempDir, { recursive: true, force: true }).catch(() => { })
     }
