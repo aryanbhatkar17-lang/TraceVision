@@ -1,3 +1,4 @@
+from video_enhancer import enhance_frame
 import os
 import cv2
 import json
@@ -220,6 +221,16 @@ class VideoChunkProcessor:
             ret, frame = cap.read()
             if not ret:
                 break
+
+                # === YOUR CLAHE ENHANCEMENT ===
+            frame = enhance_frame(frame)
+            # ==============================
+
+            # Exact timestamp calculation
+            timestamp_sec = round(current_frame_idx / fps, 2)
+
+            # Downsample for model ingestion and motion delta
+            downscaled = cv2.resize(frame, (self.target_width, self.target_height))
 
             # Exact timestamp calculation
             timestamp_sec = round(current_frame_idx / fps, 2)
