@@ -20,6 +20,42 @@ from pydantic import BaseModel, Field
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("sentinel-backend")
 
+# --------------------------------------------------------------------------
+# Optional integrations — imported with graceful fallback so server.py
+# starts even in minimal environments (e.g. CI without FFmpeg).
+# --------------------------------------------------------------------------
+try:
+    from smoothing import TemporalSmoother, ClipRange
+    _smoother = TemporalSmoother(threshold=0.75, tolerance_window=2,
+                                  min_clip_duration=3.0, frame_gap_limit=2.0)
+    logger.info("TemporalSmoother loaded.")
+except ImportError:
+    _smoother = None
+    logger.warning("smoothing.py not found — temporal smoothing will be skipped.")
+
+try:
+    from clip_cutter import ClipCutter
+    _cutter = ClipCutter(output_dir=None)  # uses default temp dir
+    if not _cutter.ffmpeg_available:
+        logger.warning(
+            "FFmpeg not found on PATH — ClipCutter will use the slower OpenCV fallback. "
+            "Install FFmpeg (https://ffmpeg.org/download.html) and add it to PATH for "
+            "zero-VRAM stream-copy extraction."
+        )
+    else:
+        logger.info("ClipCutter loaded (FFmpeg available).")
+except ImportError:
+    _cutter = None
+    logger.warning("clip_cutter.py not found — /api/clip endpoint will be unavailable.")
+
+try:
+    from hardware_monitor import HardwareMonitor, add_hardware_headers_middleware
+    _monitor = HardwareMonitor(vram_ceiling_mb=6144.0, warning_threshold=0.80)
+    logger.info("HardwareMonitor loaded.")
+except ImportError:
+    _monitor = None
+    logger.warning("hardware_monitor.py not found — hardware monitoring disabled.")
+
 app = FastAPI(
     title="Sentinel Video Audit Pipeline",
     description="Scalable long-video ingestion, streaming spooling, downsampled keyframe extraction, and multimodal audit engine.",
@@ -411,10 +447,30 @@ async def analyze_video(
     chunks = meta["chunks"]
 
     all_matches: List[MatchItem] = []
+    frame_scores: List[tuple] = []
+
     for chunk in chunks:
         sampled = chunk_proc.sample_and_compress_chunk_keyframes(str(target_path), chunk.start_second, chunk.end_second)
         chunk_matches = await auditor.analyze_chunk(chunk, sampled, query)
         all_matches.extend(chunk_matches)
+
+        # Build (timestamp, confidence) pairs for the temporal smoother
+        for frame_info in sampled:
+            ts = frame_info["timestamp_sec"]
+            motion = frame_info.get("motion_score", 0.0)
+            proxy_confidence = min(1.0, max(0.0, motion / 20.0))
+            frame_scores.append((ts, proxy_confidence))
+        for m in chunk_matches:
+            mid_ts = (m.start_seconds + m.end_seconds) / 2.0
+            frame_scores.append((mid_ts, m.confidence or 0.9))
+
+    # Apply temporal smoothing if available — bridges per-frame confidence dips
+    # caused by motion blur, poor lighting, or IR sensor noise in CCTV footage.
+    smoothed_clips = []
+    if _smoother is not None and frame_scores:
+        frame_scores.sort(key=lambda x: x[0])
+        diagnostics = _smoother.get_diagnostics(frame_scores)
+        smoothed_clips = diagnostics.get("clips", [])
 
     response = AuditResponseSchema(
         matches=all_matches,
@@ -422,7 +478,58 @@ async def analyze_video(
         video_duration=meta["duration"],
         query=query
     )
-    return response.model_dump()
+    result = response.model_dump()
+    if smoothed_clips:
+        result["smoothed_clips"] = smoothed_clips
+    return result
+
+
+@app.post("/api/clip")
+async def cut_video_clip(
+    video_id: str = Form(...),
+    start: float = Form(...),
+    end: float = Form(...),
+):
+    """
+    Extract a sub-clip from a previously uploaded video using ClipCutter.
+    Uses FFmpeg stream-copy (zero VRAM) with automatic OpenCV fallback.
+    """
+    if _cutter is None:
+        raise HTTPException(status_code=503, detail="ClipCutter not available — clip_cutter.py missing.")
+
+    video_path = UPLOAD_DIR / video_id
+    if not video_path.exists():
+        raise HTTPException(status_code=404, detail=f"Video '{video_id}' not found.")
+
+    if start >= end:
+        raise HTTPException(status_code=400, detail="'start' must be less than 'end'.")
+
+    clip_id = f"clip_{uuid.uuid4().hex[:8]}"
+    output_filename = f"{clip_id}_{start:.1f}s_{end:.1f}s.mp4"
+
+    result = _cutter.cut_clip(
+        source_path=str(video_path),
+        start_sec=start,
+        end_sec=end,
+        output_filename=output_filename,
+    )
+
+    if not result.success:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Clip extraction failed ({result.method}): {result.error}"
+        )
+
+    return {
+        "clip_id": clip_id,
+        "source_video": video_id,
+        "start_sec": result.start_sec,
+        "end_sec": result.end_sec,
+        "duration_sec": result.duration_sec,
+        "method": result.method,
+        "file_size_bytes": result.file_size_bytes,
+        "output_path": result.output_path,
+    }
 
 @app.get("/api/analyze/stream")
 async def analyze_video_stream(
