@@ -6,9 +6,12 @@ import uuid
 import math
 import asyncio
 import logging
+import shutil
+import subprocess
 import tempfile
 import numpy as np
 from pathlib import Path
+from hashlib import sha256
 from typing import List, Dict, Any, Optional, AsyncGenerator
 
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Query, Request
@@ -88,6 +91,18 @@ except Exception:
 logger.info(f"Sentinel Video Storage Directory: {UPLOAD_DIR}")
 
 # --------------------------------------------------------------------------
+# Compression & Caching Directories
+# --------------------------------------------------------------------------
+COMPRESSED_DIR = UPLOAD_DIR / "compressed"
+COMPRESSED_DIR.mkdir(exist_ok=True)
+
+FRAME_CACHE_DIR = UPLOAD_DIR / "frame_cache"
+FRAME_CACHE_DIR.mkdir(exist_ok=True)
+
+LARGE_FILE_THRESHOLD_MB = 50
+TARGET_COMPRESSED_MB = 40
+
+# --------------------------------------------------------------------------
 # Data Contracts & Strict JSON Schemas
 # --------------------------------------------------------------------------
 class MatchItem(BaseModel):
@@ -123,6 +138,130 @@ def format_timestamp(seconds: float) -> str:
     if hrs > 0:
         return f"{hrs:02d}:{mins:02d}:{secs:02d}"
     return f"{mins:02d}:{secs:02d}"
+
+
+# --------------------------------------------------------------------------
+# Adaptive Upload Compression (Server-Side Fallback)
+# --------------------------------------------------------------------------
+def compute_file_fingerprint(video_path: Path) -> str:
+    """Fast fingerprint using first 4KB + file size for keyframe caching."""
+    try:
+        with open(video_path, 'rb') as f:
+            header = f.read(4096)
+        size = video_path.stat().st_size
+        return sha256(header + str(size).encode()).hexdigest()[:16]
+    except Exception:
+        return ""
+
+
+def get_cached_frames(fingerprint: str) -> Optional[Path]:
+    """Return cached frame directory if it exists and is non-empty."""
+    cache_path = FRAME_CACHE_DIR / fingerprint
+    if cache_path.exists() and any(cache_path.iterdir()):
+        logger.info(f"Cache hit for fingerprint {fingerprint}")
+        return cache_path
+    return None
+
+
+def cache_frames(fingerprint: str, frames_dir: Path) -> Path:
+    """Copy extracted frames to cache directory for future re-analysis."""
+    dest = FRAME_CACHE_DIR / fingerprint
+    if not dest.exists():
+        try:
+            shutil.copytree(str(frames_dir), str(dest))
+            logger.info(f"Cached frames for fingerprint {fingerprint}")
+        except Exception as e:
+            logger.warning(f"Frame caching failed: {e}")
+    return dest
+
+
+def _recompress_sync(video_path: str, output_path: str, target_mb: int = 40) -> bool:
+    """Synchronous recompression using FFmpeg (runs in process pool)."""
+    size_mb = os.path.getsize(video_path) / (1024 * 1024)
+    if size_mb <= target_mb:
+        return False
+
+    try:
+        # Get duration via ffprobe
+        probe = subprocess.run(
+            ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_format', video_path],
+            capture_output=True, text=True, timeout=10
+        )
+        probe_data = json.loads(probe.stdout)
+        duration = float(probe_data.get('format', {}).get('duration', 0))
+        if duration <= 0:
+            return False
+
+        # Calculate target bitrate
+        target_bits = target_mb * 8 * 1024 * 1024
+        target_bitrate_kbps = int(target_bits / duration / 1000)
+
+        logger.info(
+            f"Recompressing {size_mb:.1f}MB -> target {target_mb}MB "
+            f"(bitrate: {target_bitrate_kbps}kbps, duration: {duration:.1f}s)"
+        )
+
+        result = subprocess.run([
+            'ffmpeg', '-y', '-i', video_path,
+            '-c:v', 'libx264', '-crf', '32', '-preset', 'fast',
+            '-vf', 'scale=640:360:force_original_aspect_ratio=decrease',
+            '-r', '10',  # 10 fps (sufficient for 1fps extraction)
+            '-an',       # Strip audio (not needed for visual audit)
+            '-movflags', '+faststart',
+            output_path
+        ], capture_output=True, timeout=300)
+
+        if result.returncode == 0 and os.path.exists(output_path):
+            new_size = os.path.getsize(output_path) / (1024 * 1024)
+            logger.info(f"Recompressed: {size_mb:.1f}MB -> {new_size:.1f}MB ({new_size/size_mb*100:.0f}% of original)")
+            return True
+        else:
+            logger.warning(f"FFmpeg recompression failed: {result.stderr.decode()[:200]}")
+            return False
+    except Exception as e:
+        logger.warning(f"Recompression error: {e}")
+        return False
+
+
+async def _background_compress(video_path: Path, output_path: Path):
+    """Background task that compresses video and logs result."""
+    try:
+        loop = asyncio.get_event_loop()
+        success = await loop.run_in_executor(
+            None,  # Use default executor
+            _recompress_sync,
+            str(video_path),
+            str(output_path),
+            TARGET_COMPRESSED_MB
+        )
+        if success:
+            logger.info(f"Background compression complete: {output_path.name}")
+        else:
+            logger.info(f"Background compression skipped (already small enough or failed)")
+    except Exception as e:
+        logger.warning(f"Background compression failed: {e}")
+
+
+async def maybe_recompress_async(video_path: Path) -> Path:
+    """Non-blocking recompression. Returns original path immediately.
+    Schedules background compression for large files."""
+    size_mb = video_path.stat().st_size / (1024 * 1024)
+
+    if size_mb <= LARGE_FILE_THRESHOLD_MB:
+        return video_path  # No compression needed
+
+    output_path = COMPRESSED_DIR / f"recompressed_{video_path.name}"
+
+    # Schedule background compression (non-blocking)
+    asyncio.create_task(_background_compress(video_path, output_path))
+
+    # Return original path immediately — analysis can start right away
+    logger.info(
+        f"Scheduled background compression for {video_path.name} "
+        f"({size_mb:.1f}MB exceeds {LARGE_FILE_THRESHOLD_MB}MB threshold)"
+    )
+    return video_path
+
 
 # --------------------------------------------------------------------------
 # Pre-Processing, Keyframe Extraction & Downsampling (OpenCV)
@@ -411,12 +550,16 @@ async def upload_video(file: UploadFile = File(...)):
     except Exception as e:
         logger.warning(f"Metadata extraction warning: {e}")
 
+    # Schedule async recompression for large files (non-blocking)
+    await maybe_recompress_async(dest_path)
+
     return {
         "video_id": dest_filename,
         "original_filename": file.filename,
         "size_bytes": total_bytes,
         "duration_seconds": round(duration, 2),
-        "path": str(dest_path)
+        "path": str(dest_path),
+        "compressed_scheduled": total_bytes > LARGE_FILE_THRESHOLD_MB * 1024 * 1024,
     }
 
 @app.post("/api/analyze")
