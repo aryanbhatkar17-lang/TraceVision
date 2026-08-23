@@ -202,13 +202,19 @@ class ClipCutter:
         return results
 
 if __name__ == '__main__':
+    import os
     cutter = ClipCutter()
     print(f"FFmpeg available: {cutter.ffmpeg_available}")
-    
-    test_video_path = Path("C:/SIH/SIH-2026/test_video.mp4")
-    if test_video_path.exists():
+
+    # Use TRACEVISION_TEST_VIDEO env var, or skip gracefully — no hardcoded paths.
+    test_video_env = os.environ.get("TRACEVISION_TEST_VIDEO", "")
+    test_video_path = Path(test_video_env) if test_video_env else None
+
+    if test_video_path and test_video_path.exists():
         print(f"Found test video at {test_video_path}. Cutting 5-second clip...")
         result = cutter.cut_clip(str(test_video_path), 0.0, 5.0)
         print(f"Result: {result.to_dict()}")
     else:
-        print(f"Test video not found at {test_video_path}. Skipping test cut.")
+        print(
+            "No test video found. Set TRACEVISION_TEST_VIDEO=/path/to/video.mp4 to run a quick cut test."
+        )
