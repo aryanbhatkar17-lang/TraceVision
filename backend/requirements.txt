@@ -1,7 +1,37 @@
-opencv-python-headless>=4.8.0
+# ============================================================
+# TraceVision Backend — Python Dependencies
+# SIH-2026 Hackathon Project
+# ============================================================
+#
+# SYSTEM-LEVEL DEPENDENCY (not a pip package):
+#   FFmpeg >= 4.x must be installed on the host OS.
+#   - Ubuntu/Debian : sudo apt install ffmpeg
+#   - macOS         : brew install ffmpeg
+#   - Windows       : https://ffmpeg.org/download.html (add to PATH)
+#
+#   clip_cutter.py uses FFmpeg for zero-VRAM stream-copy clip extraction.
+#   If FFmpeg is unavailable, it automatically falls back to OpenCV
+#   frame-by-frame re-encoding (slower, but functional on all platforms).
+# ============================================================
+
+# --- Core video processing ---
+opencv-python-headless>=4.8.0   # Frame extraction, motion scoring, OpenCV fallback for clip cutting
+
+# --- Web framework ---
 fastapi>=0.100.0
 uvicorn>=0.22.0
 pydantic>=2.0.0
-python-multipart>=0.0.6
-aiofiles>=23.1.0
+python-multipart>=0.0.6         # Required for FastAPI file upload (multipart/form-data)
+aiofiles>=23.1.0                # Async file I/O for streaming video uploads
+
+# --- Numerical / scientific ---
 numpy>=1.24.0
+
+# --- Hardware monitoring (VRAM ceiling enforcement) ---
+psutil>=5.9.0                   # CPU + RAM monitoring (hardware_monitor.py)
+# pynvml>=11.0.0                # Optional: uncomment if GPU is present for VRAM monitoring
+
+# --- Testing & HTTP client ---
+httpx>=0.24.0                   # Async HTTP client used by test_api.py
+pytest>=7.0.0                   # Test runner
+pytest-asyncio>=0.21.0          # Async test support for FastAPI endpoints
