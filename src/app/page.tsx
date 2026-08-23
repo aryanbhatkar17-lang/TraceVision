@@ -1,91 +1,125 @@
+'use client'
+
 import Link from 'next/link'
-import { Shield, Sparkles, Video, Search, Moon, ArrowRight } from 'lucide-react'
+import Image from 'next/image'
+import { Search, FileText, ArrowRight, Video, Lock, ShieldCheck } from 'lucide-react'
 
 export default function LandingPage() {
   return (
-    <div className="min-h-screen bg-background text-foreground flex flex-col justify-between">
-      {/* Header */}
-      <header className="border-b border-border bg-card/50 backdrop-blur-md sticky top-0 z-50">
-        <div className="max-w-6xl mx-auto px-6 h-16 flex items-center justify-between">
-          <div className="flex items-center gap-2.5">
-            <div className="size-8 rounded-lg bg-primary/10 border border-primary/20 flex items-center justify-center text-primary">
-              <Shield className="size-4" />
+    <div className="min-h-screen bg-[#f0f4f8] text-slate-900 flex flex-col justify-between font-sans selection:bg-blue-100 selection:text-blue-900">
+
+      {/* 1. Full-Width Edge-to-Edge Glassmorphism Floating Navbar */}
+      <div className="sticky top-0 z-50 pt-4 px-4 sm:px-8 pointer-events-none">
+        <header className="w-full h-14 px-6 sm:px-10 rounded-2xl bg-white/70 backdrop-blur-xl backdrop-saturate-150 border border-white/80 shadow-[0_10px_30px_-5px_rgba(15,23,42,0.12),inset_0_1px_1px_rgba(255,255,255,0.9)] flex items-center justify-between transition-all pointer-events-auto">
+
+          {/* Left Corner: Logo & Identity */}
+          <Link href="/" className="flex items-center space-x-3 group">
+            <div className="relative w-7 h-7 flex items-center justify-center rounded-lg overflow-hidden shrink-0 shadow-[inset_0_1px_1px_rgba(255,255,255,0.6)]">
+              <Image
+                src="/tracevision-icon.svg"
+                alt="TraceVision Icon"
+                width={28}
+                height={28}
+                className="object-contain transition-transform duration-200 group-hover:scale-105"
+                priority
+              />
             </div>
-            <span className="font-bold tracking-wider text-sm">TraceVision</span>
-          </div>
-          <Link
-            href="/dashboard"
-            className="flex items-center gap-2 px-4 py-2 rounded-lg bg-primary text-primary-foreground font-semibold text-sm hover:brightness-110 transition-all shadow-[0_0_15px_-3px_var(--color-primary)]"
-          >
-            <span>Launch Console</span>
-            <ArrowRight className="size-4" />
+            <span className="text-sm font-bold tracking-wider uppercase text-slate-800 group-hover:text-blue-700 transition-colors">
+              TraceVision
+            </span>
           </Link>
-        </div>
-      </header>
 
-      {/* Hero Section */}
-      <main className="max-w-5xl mx-auto px-6 py-16 flex-1 flex flex-col justify-center text-center">
-        <div className="inline-flex items-center gap-2 self-center px-3.5 py-1.5 rounded-full bg-secondary text-secondary-foreground border border-border text-xs font-mono mb-6">
-          <Sparkles className="size-3.5 text-primary" />
-          <span>SIH 2026 Innovation Project</span>
-        </div>
+          {/* Right Corner: Glass Badging */}
+          <div className="flex items-center">
+            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-medium text-slate-700 bg-white/60 backdrop-blur-md border border-white/90 shadow-[0_2px_8px_rgba(0,0,0,0.04),inset_0_1px_1px_rgba(255,255,255,0.9)]">
+              <ShieldCheck className="w-3.5 h-3.5 text-blue-600" />
+              Investigation Portal
+            </span>
+          </div>
+        </header>
+      </div>
 
-        <h1 className="text-4xl md:text-6xl font-extrabold tracking-tight max-w-3xl mx-auto leading-tight">
+      {/* 2. Main Hero Section */}
+      <main className="max-w-5xl w-full mx-auto px-6 py-12 lg:py-16 flex-1 flex flex-col justify-center text-center">
+
+        {/* Main Headline */}
+        <h1 className="text-4xl md:text-5xl lg:text-6xl font-extrabold tracking-tight text-slate-900 max-w-4xl mx-auto leading-tight">
           AI-Powered CCTV Video Summarization & Search
         </h1>
 
-        <p className="mt-6 text-lg text-muted-foreground max-w-2xl mx-auto leading-relaxed">
-          Locate specific visual events in hours of security footage using natural language queries. Built for low-light, low-resolution, and heavy video streams.
+        {/* Subtitle */}
+        <p className="mt-5 text-base sm:text-lg text-slate-600 max-w-2xl mx-auto leading-relaxed">
+          Locate specific visual events in hours of security footage using plain language queries. Built for low-light, low-resolution, and heavy surveillance streams.
         </p>
 
-        <div className="mt-8 flex flex-col sm:flex-row items-center justify-center gap-4">
+        {/* Primary Action Button */}
+        <div className="mt-8 flex items-center justify-center">
           <Link
             href="/dashboard"
-            className="w-full sm:w-auto flex items-center justify-center gap-2 px-6 py-3.5 rounded-lg bg-primary text-primary-foreground font-bold text-base hover:brightness-110 transition-all shadow-[0_0_20px_-3px_var(--color-primary)]"
+            className="inline-flex items-center gap-2 px-6 py-3.5 rounded-xl bg-blue-700 hover:bg-blue-800 text-white font-bold text-sm shadow-md hover:shadow-lg transition-all"
           >
-            <span>Open Audit Dashboard</span>
-            <ArrowRight className="size-5" />
+            <span>Start Video Investigation</span>
+            <ArrowRight className="w-4 h-4" />
           </Link>
         </div>
 
-        {/* Core Capability Highlights */}
-        <div className="mt-20 grid grid-cols-1 md:grid-cols-3 gap-6 text-left">
-          <div className="p-6 rounded-xl border border-border bg-card shadow-sm space-y-3">
-            <div className="size-10 rounded-lg bg-primary/10 flex items-center justify-center text-primary">
-              <Search className="size-5" />
-            </div>
-            <h3 className="font-bold text-base">Natural Language Search</h3>
-            <p className="text-xs text-muted-foreground leading-relaxed">
-              Type queries like &quot;red hatchback in morning&quot; or &quot;person wearing yellow hoodie&quot; to fetch exact timestamps instantly.
-            </p>
-          </div>
+        {/* Standard Investigation Workflow (3 Columns) */}
+        <div className="mt-16 text-left">
+          <h2 className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-4 text-center">
+            Standard Investigation Workflow
+          </h2>
 
-          <div className="p-6 rounded-xl border border-border bg-card shadow-sm space-y-3">
-            <div className="size-10 rounded-lg bg-accent flex items-center justify-center text-accent-foreground">
-              <Moon className="size-5" />
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            {/* Step 1 */}
+            <div className="p-6 rounded-2xl border border-white/80 bg-white/80 backdrop-blur-md shadow-[0_4px_20px_rgba(0,0,0,0.03)] space-y-2">
+              <div className="flex items-center gap-2 text-blue-800 font-bold text-sm">
+                <div className="p-2 bg-blue-50 border border-blue-100 rounded-lg text-blue-700">
+                  <Video className="w-4 h-4" />
+                </div>
+                Step 1: Load Video
+              </div>
+              <p className="text-xs text-slate-600 leading-relaxed pt-1">
+                Select or drag-and-drop the CCTV video clip directly from your computer (MP4, AVI, or MKV).
+              </p>
             </div>
-            <h3 className="font-bold text-base">Low-Light Enhancement</h3>
-            <p className="text-xs text-muted-foreground leading-relaxed">
-              Optimized for night-time footage and blurry feeds using feature-preserving zero-reference frame pre-processing.
-            </p>
-          </div>
 
-          <div className="p-6 rounded-xl border border-border bg-card shadow-sm space-y-3">
-            <div className="size-10 rounded-lg bg-secondary flex items-center justify-center text-secondary-foreground">
-              <Video className="size-5" />
+            {/* Step 2 */}
+            <div className="p-6 rounded-2xl border border-white/80 bg-white/80 backdrop-blur-md shadow-[0_4px_20px_rgba(0,0,0,0.03)] space-y-2">
+              <div className="flex items-center gap-2 text-blue-800 font-bold text-sm">
+                <div className="p-2 bg-blue-50 border border-blue-100 rounded-lg text-blue-700">
+                  <Search className="w-4 h-4" />
+                </div>
+                Step 2: Type What You Seek
+              </div>
+              <p className="text-xs text-slate-600 leading-relaxed pt-1">
+                Enter descriptions like <span className="font-semibold text-slate-800">"red motorbike"</span> or <span className="font-semibold text-slate-800">"person in dark hoodie"</span>.
+              </p>
             </div>
-            <h3 className="font-bold text-base">Heavy File Pipelines</h3>
-            <p className="text-xs text-muted-foreground leading-relaxed">
-              Processes multi-gigabyte video files efficiently via pre-sampled vector embeddings and fast frame scrubbing.
-            </p>
+
+            {/* Step 3 */}
+            <div className="p-6 rounded-2xl border border-white/80 bg-white/80 backdrop-blur-md shadow-[0_4px_20px_rgba(0,0,0,0.03)] space-y-2">
+              <div className="flex items-center gap-2 text-blue-800 font-bold text-sm">
+                <div className="p-2 bg-blue-50 border border-blue-100 rounded-lg text-blue-700">
+                  <FileText className="w-4 h-4" />
+                </div>
+                Step 3: Review Evidence
+              </div>
+              <p className="text-xs text-slate-600 leading-relaxed pt-1">
+                Click on matched timestamps to play key moments and inspect detections with exact time markers.
+              </p>
+            </div>
           </div>
         </div>
       </main>
 
-      {/* Footer */}
-      <footer className="border-t border-border py-6 text-center text-xs font-mono text-muted-foreground">
-        TraceVision CCTV Audit Engine — Built for Smart India Hackathon 2026
+      {/* 3. Official Departmental Footer */}
+      <footer className="border-t border-slate-200/80 bg-white/60 backdrop-blur-md py-4 px-6 text-center text-xs text-slate-500">
+        <div className="flex items-center justify-center gap-1.5">
+          <Lock className="w-3.5 h-3.5 text-slate-400" />
+          <span>Internal Police & Forensic Investigation Portal • Authorized Access Only</span>
+        </div>
       </footer>
+
     </div>
   )
 }

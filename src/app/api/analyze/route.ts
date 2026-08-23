@@ -2,38 +2,15 @@ import { NextRequest, NextResponse } from 'next/server'
 import { AuditMatch, AuditResponse } from '@/types/audit'
 import { extractFrames } from '@/lib/ffmpeg'
 import { filterStaticFrames } from '@/lib/motion-filter'
-import { GoogleGenAI, Type, Schema } from '@google/genai'
 import path from 'path'
 import fs from 'fs/promises'
 import os from 'os'
-
-// Type guard for validating Gemini response structure
-interface GeminiMatch {
-  start_seconds?: number
-  end_seconds?: number
-  category?: string
-  description?: string
-  confidence?: number
-}
-
-function isValidGeminiMatch(match: unknown): match is GeminiMatch {
-  if (typeof match !== 'object' || match === null) return false
-  const m = match as Record<string, unknown>
-  return (
-    typeof m.start_seconds === 'number' &&
-    typeof m.end_seconds === 'number' &&
-    typeof m.description === 'string'
-  )
-}
 
 // Next.js Route Segment Configuration:
 // 1. Force dynamic execution for every audit request (no caching)
 // 2. Extend timeout window to 300 seconds (5 minutes) for processing video files
 export const dynamic = 'force-dynamic'
 export const maxDuration = 300
-
-// Initialize Google Gemini Client
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY })
 
 /**
  * Utility: Converts numeric seconds into standardized MM:SS or HH:MM:SS format
@@ -155,32 +132,32 @@ export async function POST(req: NextRequest) {
     // -------------------------------------------------------------
     // STEP 6: Define Strict JSON Schema for Structured Incident Output
     // -------------------------------------------------------------
-    const auditSchema: Schema = {
-      type: Type.OBJECT,
+    const auditSchema = {
+      type: 'OBJECT',
       properties: {
         matches: {
-          type: Type.ARRAY,
+          type: 'ARRAY',
           items: {
-            type: Type.OBJECT,
+            type: 'OBJECT',
             properties: {
               start_seconds: {
-                type: Type.NUMBER,
+                type: 'NUMBER',
                 description: 'Exact starting timestamp second where the query target appears in the video.',
               },
               end_seconds: {
-                type: Type.NUMBER,
+                type: 'NUMBER',
                 description: 'Exact ending timestamp second where the query target leaves the frame.',
               },
               category: {
-                type: Type.STRING,
+                type: 'STRING',
                 description: 'PERSON, VEHICLE, OBJECT, SECURITY, or ANOMALY',
               },
               description: {
-                type: Type.STRING,
+                type: 'STRING',
                 description: 'Concise description of the observed target activity.',
               },
               confidence: {
-                type: Type.NUMBER,
+                type: 'NUMBER',
                 description: 'Confidence score between 0.0 and 1.0 based strictly on visual clarity.',
               },
             },
@@ -192,14 +169,20 @@ export async function POST(req: NextRequest) {
     }
 
     // -------------------------------------------------------------
-    // STEP 7: Run Multimodal Vision Inference (Gemini 3.6 Flash SDK)
+    // STEP 7: Run Multimodal Vision Inference (Gemini 3.6 Flash)
     // -------------------------------------------------------------
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.6-flash',
-      contents: [
-        ...imageParts,
-        {
-          text: `You are an automated CCTV Video Surveillance Audit Engine.
+    const geminiResponse = await fetch(
+      'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=' +
+        encodeURIComponent(process.env.GEMINI_API_KEY),
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [
+            {
+              parts: [
+                ...imageParts.map((part) => ({ inline_data: part.inlineData })),
+                { text: `You are an automated CCTV Video Surveillance Audit Engine.
 The provided sequence contains ONLY frames where active visual motion was detected.
 Frame Timestamp Index: [ ${timestampsIndex} ]
 
@@ -210,34 +193,45 @@ Strict Instructions:
 2. If the target is NOT visible in the frames, return an empty array for matches.
 3. Map start_seconds and end_seconds directly to the real timestamps provided in the Timestamp Index.
 4. Output valid JSON adhering strictly to the response schema.`,
-        },
-      ],
-      config: {
-        responseMimeType: 'application/json',
-        responseSchema: auditSchema,
-      },
-    })
+                },
+              ],
+            },
+          ],
+          generationConfig: {
+            responseMimeType: 'application/json',
+            responseSchema: auditSchema,
+          },
+        }),
+      }
+    )
 
-    // Parse structured JSON output from response.text
-    const parsed = JSON.parse(response.text || '{"matches":[]}')
-    const rawMatches: unknown[] = parsed.matches || []
+    if (!geminiResponse.ok) {
+      throw new Error(`Gemini API request failed (${geminiResponse.status})`)
+    }
+
+    const response = (await geminiResponse.json()) as {
+      candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>
+    }
+    const responseText = response.candidates?.[0]?.content?.parts?.[0]?.text
+
+    // Parse the structured JSON response
+    const parsed = JSON.parse(responseText || '{"matches":[]}')
+    const rawMatches = parsed.matches || []
 
     // -------------------------------------------------------------
     // STEP 8: Format Matches for the Frontend Dashboard & Timeline
     // -------------------------------------------------------------
-    const formattedMatches: AuditMatch[] = rawMatches
-      .filter(isValidGeminiMatch)
-      .map((m, index) => ({
-        id: `match-${index + 1}`,
-        start_time: formatSeconds(m.start_seconds!),
-        end_time: formatSeconds(m.end_seconds!),
-        start_seconds: Math.round(m.start_seconds!),
-        end_seconds: Math.round(m.end_seconds!),
-        category: m.category || 'PERSON',
-        description: m.description!,
-        confidence: typeof m.confidence === 'number' ? Number(m.confidence.toFixed(2)) : 0.9,
-        chunk_id: `chunk_${String(index + 1).padStart(3, '0')}`,
-      }))
+    const formattedMatches: AuditMatch[] = rawMatches.map((m: any, index: number) => ({
+      id: `match-${index + 1}`,
+      start_time: formatSeconds(m.start_seconds),
+      end_time: formatSeconds(m.end_seconds),
+      start_seconds: Math.round(m.start_seconds),
+      end_seconds: Math.round(m.end_seconds),
+      category: m.category || 'PERSON',
+      description: m.description,
+      confidence: Number(m.confidence?.toFixed(2)) || 0.9,
+      chunk_id: `chunk_${String(index + 1).padStart(3, '0')}`,
+    }))
 
     const responsePayload: AuditResponse = {
       matches: formattedMatches,
