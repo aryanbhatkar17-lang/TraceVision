@@ -1,20 +1,23 @@
 'use client'
 
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { Sidebar } from './sidebar'
-import { Topbar } from './topbar'
+import Link from 'next/link'
+import Image from 'next/image'
 import { QueryBar } from './query-bar'
 import { VideoPlayer } from './video-player'
 import { AuditResults } from './audit-results'
 import { AuditMatch, TimelineMarker, AnalysisProgress, AuditResponse } from '@/types/audit'
+import { ShieldCheck, RotateCcw } from 'lucide-react'
 
-export function Dashboard() {
-  // Initial State: Strict Zero Mock Data on Load
+export default function Dashboard() {
+  // Video & Playback State
   const [videoFile, setVideoFile] = useState<File | null>(null)
   const [videoUrl, setVideoUrl] = useState<string | null>(null)
   const [videoDuration, setVideoDuration] = useState<number>(0)
   const [currentTime, setCurrentTime] = useState<number>(0)
   const [isPlaying, setIsPlaying] = useState<boolean>(false)
+
+  // Incident & Analysis State
   const [matches, setMatches] = useState<AuditMatch[]>([])
   const [markers, setMarkers] = useState<TimelineMarker[]>([])
   const [activeMatchId, setActiveMatchId] = useState<string | null>(null)
@@ -45,10 +48,9 @@ export function Dashboard() {
 
   // Handle Video File Upload
   const handleFileUpload = useCallback((file: File) => {
-    // Check 500MB maximum body limit
     const MAX_SIZE_BYTES = 500 * 1024 * 1024
     if (file.size > MAX_SIZE_BYTES) {
-      alert(`File size exceeds the 500MB maximum limit (${(file.size / (1024 * 1024)).toFixed(1)}MB). Please select a compressed file.`)
+      alert(`File size exceeds the 500MB limit (${(file.size / (1024 * 1024)).toFixed(1)}MB). Please choose a compressed file.`)
       return
     }
 
@@ -66,19 +68,35 @@ export function Dashboard() {
     setProgress(null)
   }, [videoUrl])
 
+  // Reset Everything
+  const handleReset = useCallback(() => {
+    if (videoUrl && videoUrl.startsWith('blob:')) {
+      URL.revokeObjectURL(videoUrl)
+    }
+    setVideoFile(null)
+    setVideoUrl(null)
+    setVideoDuration(0)
+    setCurrentTime(0)
+    setIsPlaying(false)
+    setMatches([])
+    setMarkers([])
+    setActiveMatchId(null)
+    setProgress(null)
+  }, [videoUrl])
+
   // Handle Seeking & Playhead Synchronization
   const handleSeek = useCallback((seconds: number) => {
     setCurrentTime(seconds)
   }, [])
 
-  // Handle Timeline Marker Click - Seek & Resume Active Continuous Playback
+  // Handle Timeline Marker Click
   const handleSelectMarker = useCallback((id: string, seconds: number) => {
     setActiveMatchId(id)
     setCurrentTime(seconds)
     setIsPlaying(true)
   }, [])
 
-  // Handle Audit Result Card Click - Seek & Resume Active Continuous Playback
+  // Handle Audit Result Card Click
   const handleSelectMatch = useCallback((id: string, startSeconds: number) => {
     setActiveMatchId(id)
     setCurrentTime(startSeconds)
@@ -107,7 +125,7 @@ export function Dashboard() {
   // Execute Video Analysis Pipeline
   const handleAnalyze = async (query: string) => {
     if (!videoFile && !videoUrl) {
-      alert('Please upload a video file first.')
+      alert('Please load a video recording first.')
       return
     }
 
@@ -121,11 +139,10 @@ export function Dashboard() {
     try {
       const dur = videoDuration || 120
 
-      // Step 1: UI Progress updates
       setProgress({
         status: 'uploading',
         progress: 20,
-        message: `Uploading footage (${videoFile ? (videoFile.size / (1024 * 1024)).toFixed(1) : '0'} MB)...`,
+        message: `Reading video stream (${videoFile ? (videoFile.size / (1024 * 1024)).toFixed(1) : '0'} MB)...`,
       })
 
       uploadTimer = setTimeout(() => {
@@ -148,7 +165,6 @@ export function Dashboard() {
         }
       }, 1500)
 
-      // Ensure a valid binary File exists
       let fileToSend = videoFile
       if (!fileToSend && videoUrl) {
         const blobRes = await fetch(videoUrl)
@@ -160,15 +176,13 @@ export function Dashboard() {
         throw new Error('No valid video file could be prepared for analysis.')
       }
 
-      // Build payload containing expected keys
       const formData = new FormData()
       formData.append('video', fileToSend)
-      formData.append('file', fileToSend) // Fallback alias
+      formData.append('file', fileToSend)
       formData.append('query', query)
       formData.append('duration', dur.toString())
       formData.append('fileName', fileToSend.name)
 
-      // Send to Next.js API Route
       const response = await fetch('/api/analyze', {
         method: 'POST',
         body: formData,
@@ -180,13 +194,12 @@ export function Dashboard() {
 
       if (!response.ok) {
         const errJson = await response.json().catch(() => ({}))
-        throw new Error(errJson.error || `Server returned ${response.status}: ${response.statusText}`)
+        throw new Error(errJson.error || `Server returned ${response.status}:${response.statusText}`)
       }
 
       const data: AuditResponse = await response.json()
       const returnedMatches: AuditMatch[] = data.matches || []
 
-      // Generate visual timeline markers
       const totalDur = videoDuration || data.video_duration || dur
       const generatedMarkers: TimelineMarker[] = returnedMatches.map((m) => {
         const cat = (m.category || 'ANOMALY').toUpperCase()
@@ -213,14 +226,14 @@ export function Dashboard() {
       setProgress({
         status: 'completed',
         progress: 100,
-        message: `Audit complete. Identified ${returnedMatches.length} matching surveillance event(s).`,
+        message: `Identified ${returnedMatches.length} matching surveillance event(s).`,
       })
     } catch (err: unknown) {
       if (err instanceof Error && err.name === 'AbortError') {
         return
       }
-      const message = err instanceof Error ? err.message : 'Analysis failed. Please verify video format and retry.'
-      console.error('Audit analysis failed:', err)
+      const message = err instanceof Error ? err.message : 'Analysis failed. Please check video format and retry.'
+      console.error('Analysis error:', err)
       setProgress({
         status: 'error',
         progress: 0,
@@ -236,22 +249,63 @@ export function Dashboard() {
   }
 
   return (
-    <div className="flex h-screen w-full overflow-hidden bg-background">
-      <Sidebar />
-      <div className="flex flex-1 flex-col min-w-0 overflow-hidden">
-        <Topbar />
+    <div className="min-h-screen bg-[#f0f4f8] text-slate-900 flex flex-col font-sans selection:bg-blue-100 selection:text-blue-900">
 
-        <main className="flex-1 overflow-y-auto p-4 lg:p-6 space-y-4">
-          <QueryBar
-            onAnalyze={handleAnalyze}
-            onFileUpload={handleFileUpload}
-            onCancel={handleCancelAnalysis}
-            isProcessing={isProcessing}
-            hasVideo={Boolean(videoUrl)}
-            currentFileName={videoFile?.name}
-          />
+      {/* 1. Integrated Header */}
+      <header className="sticky top-0 z-50 bg-white/70 backdrop-blur-xl border-b border-slate-200/90 shadow-[0_4px_20px_rgba(0,0,0,0.03)] px-6 lg:px-10 h-14 flex items-center justify-between">
+        <Link href="/" className="flex items-center space-x-3 group">
+          <div className="relative w-7 h-7 flex items-center justify-center rounded-lg overflow-hidden shrink-0 shadow-sm bg-slate-900">
+            <Image
+              src="/tracevision-icon.svg"
+              alt="TraceVision Icon"
+              width={28}
+              height={28}
+              className="object-contain"
+              priority
+            />
+          </div>
+          <span className="text-sm font-bold tracking-wider uppercase text-slate-800 group-hover:text-blue-700 transition-colors">
+            TraceVision
+          </span>
+        </Link>
 
-          <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_380px]">
+        <div className="flex items-center gap-3">
+          {videoUrl && (
+            <button
+              onClick={handleReset}
+              className="inline-flex items-center gap-1.5 px-3 py-1 text-xs font-semibold text-slate-600 hover:text-slate-900 bg-white border border-slate-200 rounded-lg shadow-2xs hover:bg-slate-50 transition cursor-pointer"
+              title="Reset Video and Search"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              Reset Feed
+            </button>
+          )}
+
+          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-medium text-slate-700 bg-white/60 border border-slate-200 shadow-2xs">
+            <ShieldCheck className="w-3.5 h-3.5 text-blue-600" />
+            Console Active
+          </span>
+        </div>
+      </header>
+
+      {/* 2. Main Workbench Area */}
+      <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-8 space-y-4">
+
+        {/* Search Query Controller */}
+        <QueryBar
+          onAnalyze={handleAnalyze}
+          onFileUpload={handleFileUpload}
+          onCancel={handleCancelAnalysis}
+          isProcessing={isProcessing}
+          hasVideo={Boolean(videoUrl)}
+          currentFileName={videoFile?.name}
+        />
+
+        {/* Video Canvas & Evidence Results Grid */}
+        <div className="grid grid-cols-1 gap-5 lg:grid-cols-[minmax(0,1fr)_380px] items-start">
+
+          {/* Video Player / Light-Greyish Empty Box */}
+          <div className="w-full">
             <VideoPlayer
               videoUrl={videoUrl}
               videoName={videoFile?.name}
@@ -267,20 +321,22 @@ export function Dashboard() {
               onTimeUpdate={(t) => setCurrentTime(t)}
               onLoadedMetadata={(d) => setVideoDuration(d)}
             />
-
-            <div className="h-[450px] lg:h-[calc(100vh-14rem)]">
-              <AuditResults
-                matches={matches}
-                isProcessing={isProcessing}
-                progress={progress}
-                activeMatchId={activeMatchId}
-                onSelect={handleSelectMatch}
-                onCancel={handleCancelAnalysis}
-              />
-            </div>
           </div>
-        </main>
-      </div>
+
+          {/* Evidence Incident Log */}
+          <div className="w-full sticky top-20">
+            <AuditResults
+              matches={matches}
+              isProcessing={isProcessing}
+              progress={progress}
+              activeMatchId={activeMatchId}
+              onSelect={handleSelectMatch}
+              onCancel={handleCancelAnalysis}
+            />
+          </div>
+
+        </div>
+      </main>
     </div>
   )
 }
