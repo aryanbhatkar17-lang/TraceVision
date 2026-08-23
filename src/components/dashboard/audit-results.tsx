@@ -50,7 +50,9 @@ export function AuditResults({
             <div className="space-y-1.5 w-full max-w-xs">
               <div className="flex items-center justify-between text-xs font-mono text-primary font-bold">
                 <span>
-                  {progress?.status === 'uploading'
+                  {progress?.status === 'compressing'
+                    ? 'COMPRESSING'
+                    : progress?.status === 'uploading'
                     ? 'UPLOADING'
                     : progress?.status === 'extracting'
                     ? 'EXTRACTING'
