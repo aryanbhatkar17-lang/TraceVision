@@ -18,7 +18,7 @@ interface VideoPlayerProps {
   onSelectMarker: (id: string, seconds: number) => void
   onFileUpload: (file: File) => void
   onTimeUpdate?: (seconds: number) => void
-  onLoadedMetadata?: (duration: number) => void
+  onLoadedMetadata?: (duration: number, meta?: { width: number; height: number; fps: number }) => void
 }
 
 function formatTime(seconds: number): string {
@@ -167,8 +167,17 @@ export function VideoPlayer({
                   if (onTimeUpdate) onTimeUpdate(curr)
                 }}
                 onLoadedMetadata={(e) => {
-                  const dur = e.currentTarget.duration
-                  if (onLoadedMetadata && !isNaN(dur)) onLoadedMetadata(dur)
+                  const video = e.currentTarget
+                  const dur = video.duration
+                  if (onLoadedMetadata && !isNaN(dur)) {
+                    // Extract video metadata for compression profiling
+                    const meta = {
+                      width: video.videoWidth || 0,
+                      height: video.videoHeight || 0,
+                      fps: 30, // Default — browsers don't expose native fps
+                    }
+                    onLoadedMetadata(dur, meta)
+                  }
                 }}
                 onEnded={() => {
                   if (isPlaying) onPlayPause()
