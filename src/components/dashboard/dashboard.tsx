@@ -7,12 +7,15 @@ import { QueryBar } from './query-bar'
 import { VideoPlayer } from './video-player'
 import { AuditResults } from './audit-results'
 import { AuditMatch, TimelineMarker, AnalysisProgress, AuditResponse } from '@/types/audit'
+import { preloadFFmpeg } from '@/lib/ffmpeg-preload'
+import { compressVideo } from '@/lib/compress'
 
 export function Dashboard() {
   // Initial State: Strict Zero Mock Data on Load
   const [videoFile, setVideoFile] = useState<File | null>(null)
   const [videoUrl, setVideoUrl] = useState<string | null>(null)
   const [videoDuration, setVideoDuration] = useState<number>(0)
+  const [videoMeta, setVideoMeta] = useState<{ width: number; height: number; fps: number } | null>(null)
   const [currentTime, setCurrentTime] = useState<number>(0)
   const [isPlaying, setIsPlaying] = useState<boolean>(false)
   const [matches, setMatches] = useState<AuditMatch[]>([])
@@ -21,6 +24,11 @@ export function Dashboard() {
   const [isProcessing, setIsProcessing] = useState<boolean>(false)
   const [progress, setProgress] = useState<AnalysisProgress | null>(null)
   const abortControllerRef = useRef<AbortController | null>(null)
+
+  // Preload FFmpeg.wasm in the background when dashboard mounts
+  useEffect(() => {
+    preloadFFmpeg()
+  }, [])
 
   // Clear any residual session / local state on initial mount
   useEffect(() => {
@@ -64,6 +72,7 @@ export function Dashboard() {
     setMarkers([])
     setActiveMatchId(null)
     setProgress(null)
+    setVideoMeta(null) // Reset metadata on new file
   }, [videoUrl])
 
   // Handle Seeking & Playhead Synchronization
@@ -121,12 +130,68 @@ export function Dashboard() {
     try {
       const dur = videoDuration || 120
 
-      // Step 1: UI Progress updates
-      setProgress({
-        status: 'uploading',
-        progress: 20,
-        message: `Uploading footage (${videoFile ? (videoFile.size / (1024 * 1024)).toFixed(1) : '0'} MB)...`,
-      })
+      // Ensure a valid binary File exists
+      let fileToSend = videoFile
+      if (!fileToSend && videoUrl) {
+        const blobRes = await fetch(videoUrl)
+        const blob = await blobRes.blob()
+        fileToSend = new File([blob], 'footage.mp4', { type: blob.type || 'video/mp4' })
+      }
+
+      if (!fileToSend) {
+        throw new Error('No valid video file could be prepared for analysis.')
+      }
+
+      // Step 0: Client-side compression (non-blocking Web Worker)
+      let uploadFile = fileToSend
+      if (videoMeta) {
+        try {
+          setProgress({
+            status: 'compressing',
+            progress: 0,
+            message: 'Optimizing video for upload...',
+          })
+
+          const compressed = await compressVideo({
+            file: fileToSend,
+            duration: dur,
+            width: videoMeta.width,
+            height: videoMeta.height,
+            fps: videoMeta.fps,
+            onProgress: (pct) => {
+              if (!abortController.signal.aborted) {
+                setProgress({
+                  status: 'compressing',
+                  progress: pct,
+                  message: `Compressing video... ${pct}%`,
+                })
+              }
+            },
+          })
+
+          if (!abortController.signal.aborted) {
+            uploadFile = new File([compressed.blob], compressed.filename, {
+              type: 'video/mp4',
+            })
+            console.log(
+              `[Sentinel] Compressed: ${compressed.reduction}% reduction ` +
+              `(${(compressed.originalSize / 1e6).toFixed(1)}MB → ${(compressed.compressedSize / 1e6).toFixed(1)}MB)`,
+            )
+          }
+        } catch (compressErr) {
+          console.warn('[Sentinel] Compression failed, uploading original:', compressErr)
+          // Fall back to original file
+        }
+      }
+
+      // Step 1: Upload progress
+      if (!abortController.signal.aborted) {
+        setProgress({
+          status: 'uploading',
+          progress: 20,
+          message: `Uploading footage (${(uploadFile.size / (1024 * 1024)).toFixed(1)} MB)...`,
+        })
+      }
 
       uploadTimer = setTimeout(() => {
         if (!abortController.signal.aborted) {
@@ -148,25 +213,13 @@ export function Dashboard() {
         }
       }, 1500)
 
-      // Ensure a valid binary File exists
-      let fileToSend = videoFile
-      if (!fileToSend && videoUrl) {
-        const blobRes = await fetch(videoUrl)
-        const blob = await blobRes.blob()
-        fileToSend = new File([blob], 'footage.mp4', { type: blob.type || 'video/mp4' })
-      }
-
-      if (!fileToSend) {
-        throw new Error('No valid video file could be prepared for analysis.')
-      }
-
       // Build payload containing expected keys
       const formData = new FormData()
-      formData.append('video', fileToSend)
-      formData.append('file', fileToSend) // Fallback alias
+      formData.append('video', uploadFile)
+      formData.append('file', uploadFile) // Fallback alias
       formData.append('query', query)
       formData.append('duration', dur.toString())
-      formData.append('fileName', fileToSend.name)
+      formData.append('fileName', uploadFile.name)
 
       // Send to Next.js API Route
       const response = await fetch('/api/analyze', {
@@ -265,7 +318,10 @@ export function Dashboard() {
               onSelectMarker={handleSelectMarker}
               onFileUpload={handleFileUpload}
               onTimeUpdate={(t) => setCurrentTime(t)}
-              onLoadedMetadata={(d) => setVideoDuration(d)}
+              onLoadedMetadata={(d, meta) => {
+                setVideoDuration(d)
+                if (meta) setVideoMeta(meta)
+              }}
             />
 
             <div className="h-[450px] lg:h-[calc(100vh-14rem)]">
