@@ -29,7 +29,7 @@ export interface TimelineMarker {
 }
 
 export interface AnalysisProgress {
-  status: 'idle' | 'uploading' | 'extracting' | 'analyzing' | 'aggregating' | 'completed' | 'error' | 'cancelled'
+  status: 'idle' | 'compressing' | 'uploading' | 'extracting' | 'analyzing' | 'aggregating' | 'completed' | 'error' | 'cancelled'
   progress: number // Percentage 0 - 100
   message: string
   currentSegment?: number
