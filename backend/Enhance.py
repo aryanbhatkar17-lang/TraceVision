@@ -3,7 +3,7 @@ import torch
 import cv2
 import numpy as np
 import logging
-from typing import Optional
+from typing import Optional, Any, Union
 from model import EnhanceNetNoPool
 
 # Configure logging
@@ -39,7 +39,7 @@ def load_zero_dce() -> Optional[torch.nn.Module]:
         logger.error(f"Failed to load Zero-DCE model: {e}")
         return None
 
-def apply_zero_dce(image_input: any, model: Optional[torch.nn.Module] = None) -> Optional[np.ndarray]:
+def apply_zero_dce(image_input: Union[str, np.ndarray], model: Optional[torch.nn.Module] = None) -> Optional[np.ndarray]:
     """
     Enhances a single image or video frame using Zero-DCE.
     
