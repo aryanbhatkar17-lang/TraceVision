@@ -91,14 +91,15 @@ def enhance_frame_full(frame: np.ndarray) -> Optional[np.ndarray]:
         # Apply Zero-DCE if available
         if _zero_dce_model is not None:
             try:
-                enhanced = _apply_zero_dce(enhanced, _zero_dce_model)
-                if enhanced is None:
+                zero_dce_result = _apply_zero_dce(enhanced, _zero_dce_model)
+                if zero_dce_result is not None:
+                    enhanced = zero_dce_result
+                else:
                     logger.warning("Zero-DCE enhancement returned None, using CLAHE result")
-                    return enhanced
+                    # enhanced keeps the CLAHE result
             except Exception as e:
                 logger.warning(f"Zero-DCE enhancement failed on frame: {e}. Using CLAHE result.")
-                # Return CLAHE result since Zero-DCE failed
-                return enhanced
+                # enhanced keeps the CLAHE result
         
         return enhanced
     except Exception as e:
@@ -385,8 +386,6 @@ class LocalSemanticAuditor:
             clusters.append(cur_cluster)
 
         # Categorize based on query keywords (improved with word boundary matching)
-        q_lower = query.lower()
-        
         if match_query_keyword(query, ["car", "vehicle", "truck", "bike", "traffic", "automobile"]):
             category = "VEHICLE"
             desc_template = "Target vehicle activity detected in enhanced low-light frame"
