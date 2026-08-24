@@ -5,10 +5,10 @@ import math
 #import pytorch_colors as colors
 import numpy as np
 
-class enhance_net_nopool(nn.Module):
+class EnhanceNetNoPool(nn.Module):
 
 	def __init__(self):
-		super(enhance_net_nopool, self).__init__()
+		super(EnhanceNetNoPool, self).__init__()
 
 		self.relu = nn.ReLU(inplace=True)
 
@@ -20,9 +20,6 @@ class enhance_net_nopool(nn.Module):
 		self.e_conv5 = nn.Conv2d(number_f*2,number_f,3,1,1,bias=True) 
 		self.e_conv6 = nn.Conv2d(number_f*2,number_f,3,1,1,bias=True) 
 		self.e_conv7 = nn.Conv2d(number_f*2,24,3,1,1,bias=True) 
-
-		self.maxpool = nn.MaxPool2d(2, stride=2, return_indices=False, ceil_mode=False)
-		self.upsample = nn.UpsamplingBilinear2d(scale_factor=2)
 
 
 		

@@ -1,12 +1,24 @@
+import os 
 import torch
 import cv2
 import numpy as np
-from model import enhance_net_nopool
+from model import EnhanceNetNoPool
 
 def load_zero_dce():
     """Loads and initializes the Zero-DCE model with pre-trained weights."""
-    DCE_net = enhance_net_nopool()
-    DCE_net.load_state_dict(torch.load('Epoch99.pth', map_location='cpu'))
+    # 1. Updated class name to PascalCase
+    DCE_net = EnhanceNetNoPool() 
+    
+    # 2. Dynamic path generation
+    model_path = os.path.join(os.getcwd(), 'Epoch99.pth')
+    
+    # 3. Error handling (Python's version of try-catch)
+    try:
+        DCE_net.load_state_dict(torch.load(model_path, map_location='cpu'))
+    except FileNotFoundError:
+        print(f"CRITICAL ERROR: AI model not found at {model_path}. Please download it.")
+        return None # Prevents the server from crashing entirely
+        
     DCE_net.eval()
     return DCE_net
 
@@ -48,12 +60,27 @@ def enhance_video(input_video_path, output_video_path):
     out = cv2.VideoWriter(output_video_path, fourcc, fps, (width, height))
     
     print("Processing video frames through Zero-DCE...")
+    frame_count = 0  # Added frame counter
+    
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
             break
+            
+        # --- INPUT VALIDATION FIX ---
+        if frame is None or frame.size == 0:
+            print(f"Warning: Skipping empty or corrupted frame at index {frame_count}.")
+            frame_count += 1
+            continue
+            
+        # --- PROGRESS FEEDBACK FIX ---
+        if frame_count % 10 == 0:
+            print(f"Processing frame {frame_count}...")
+            
         enhanced_frame = apply_zero_dce(frame, model)
         out.write(enhanced_frame)
+        
+        frame_count += 1  # Increment the counter
         
     cap.release()
     out.release()
