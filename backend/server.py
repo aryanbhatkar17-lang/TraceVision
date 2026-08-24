@@ -1,9 +1,7 @@
 from video_enhancer import enhance_frame
 import os
-import io
 import cv2
 import json
-import time
 import uuid
 import math
 import asyncio
@@ -14,9 +12,9 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional, AsyncGenerator
 import re
 
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Query, Request
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 # Configure logging
@@ -490,7 +488,6 @@ async def analyze_video(
     video_id: Optional[str] = Form(None),
     file: Optional[UploadFile] = File(None),
     query: str = Form(...),
-    duration: Optional[float] = Form(None),
     chunk_size: Optional[float] = Form(60.0)
 ):
     """
@@ -627,8 +624,10 @@ async def analyze_video_stream(
             for idx, chunk in enumerate(chunks):
                 current_seg = idx + 1
                 start_pct = 25 + int((idx / total_chunks) * 65)
+                start_ts = format_timestamp(chunk.start_second)
+                end_ts = format_timestamp(chunk.end_second)
                 
-                yield f"data: {json.dumps({'status': 'analyzing', 'progress': start_pct, 'message': f'Analyzing segment {current_seg} of {total_chunks} ({format_timestamp(chunk.start_second)} - {format_timestamp(chunk.end_second)})...', 'currentSegment': current_seg, 'totalSegments': total_chunks})}\n\n"
+                yield f"data: {json.dumps({'status': 'analyzing', 'progress': start_pct, 'message': f'Analyzing segment {current_seg} of {total_chunks} ({start_ts} - {end_ts})...', 'currentSegment': current_seg, 'totalSegments': total_chunks})}\n\n"
                 
                 sampled = chunk_proc.sample_and_compress_chunk_keyframes(str(video_path), chunk.start_second, chunk.end_second)
                 chunk_matches = await auditor.analyze_chunk(chunk, sampled, query)
