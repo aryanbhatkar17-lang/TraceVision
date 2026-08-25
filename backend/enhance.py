@@ -88,8 +88,30 @@ def load_zero_dce() -> Optional[torch.nn.Module]:
 
     try:
         model = EnhanceNetNoPool()
-        state_dict = torch.load(str(model_path), map_location=device, weights_only=False)
-        model.load_state_dict(state_dict)
+        # Load checkpoint and accept multiple common checkpoint formats
+        loaded = torch.load(str(model_path), map_location=device)
+        if isinstance(loaded, dict):
+            # common keys: 'state_dict', 'model_state_dict'
+            if 'state_dict' in loaded:
+                state_dict = loaded['state_dict']
+            elif 'model_state_dict' in loaded:
+                state_dict = loaded['model_state_dict']
+            else:
+                state_dict = loaded
+        else:
+            state_dict = loaded
+
+        # If state_dict keys are prefixed (e.g., 'module.' from DataParallel),
+        # try to load normally and fallback to stripping prefixes if needed.
+        try:
+            model.load_state_dict(state_dict)
+        except RuntimeError:
+            new_state = {}
+            for k, v in state_dict.items():
+                new_key = k.replace('module.', '') if k.startswith('module.') else k
+                new_state[new_key] = v
+            model.load_state_dict(new_state)
+
         model.to(device)
         model.eval()
         logger.info("Zero-DCE model loaded: path=%s device=%s", model_path, device)
