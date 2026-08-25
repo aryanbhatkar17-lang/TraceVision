@@ -88,7 +88,7 @@ def load_zero_dce() -> Optional[torch.nn.Module]:
 
     try:
         model = EnhanceNetNoPool()
-        state_dict = torch.load(str(model_path), map_location=device, weights_only=False)
+        state_dict = torch.load(str(model_path), map_location="cpu")
         model.load_state_dict(state_dict)
         model.to(device)
         model.eval()
