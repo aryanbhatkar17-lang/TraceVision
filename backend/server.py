@@ -53,15 +53,15 @@ except ImportError:
 # Zero-DCE low-light enhancement
 # --------------------------------------------------------------------------
 try:
-    from Enhance import load_zero_dce, apply_zero_dce as _apply_zero_dce
+    from enhance import load_zero_dce, apply_zero_dce as _apply_zero_dce
     _zero_dce_model = load_zero_dce()
     if _zero_dce_model is not None:
         logger.info("Zero-DCE model loaded — low-light enhancement is active.")
     else:
         logger.warning("Zero-DCE weights not found — falling back to CLAHE-only.")
-except ImportError:
+except ImportError as exc:
     _zero_dce_model = None
-    logger.warning("Enhance.py not found — Zero-DCE enhancement unavailable.")
+    logger.warning("enhance.py not found (%s) — Zero-DCE enhancement unavailable.", exc)
 
 
 def enhance_frame_full(frame: np.ndarray) -> Optional[np.ndarray]:
@@ -96,12 +96,12 @@ def enhance_frame_full(frame: np.ndarray) -> Optional[np.ndarray]:
                     logger.warning("Zero-DCE enhancement returned None, using CLAHE result")
                     # enhanced keeps the CLAHE result
             except Exception as e:
-                logger.warning(f"Zero-DCE enhancement failed on frame: {e}. Using CLAHE result.")
+                logger.warning("Zero-DCE enhancement failed on frame: %s. Using CLAHE result.", e, exc_info=True)
                 # enhanced keeps the CLAHE result
         
         return enhanced
     except Exception as e:
-        logger.error(f"Frame enhancement pipeline failed: {e}")
+        logger.error("Frame enhancement pipeline failed: %s", e, exc_info=True)
         return None
 
 
@@ -154,6 +154,24 @@ app.add_middleware(
 )
 
 # --------------------------------------------------------------------------
+# Configuration (all tunable via environment variables)
+# --------------------------------------------------------------------------
+BRIGHTNESS_THRESHOLD = float(os.environ.get("BRIGHTNESS_THRESHOLD", "90.0"))
+MOTION_THRESHOLD = float(os.environ.get("MOTION_THRESHOLD", "8.0"))
+CHUNK_DURATION_SEC = float(os.environ.get("CHUNK_DURATION_SEC", "60.0"))
+SAMPLE_FPS = float(os.environ.get("SAMPLE_FPS", "1.0"))
+TARGET_WIDTH = int(os.environ.get("TARGET_WIDTH", "640"))
+TARGET_HEIGHT = int(os.environ.get("TARGET_HEIGHT", "360"))
+JPEG_QUALITY = int(os.environ.get("JPEG_QUALITY", "75"))
+
+logger.info(
+    "Configuration: BRIGHTNESS_THRESHOLD=%.1f MOTION_THRESHOLD=%.1f "
+    "CHUNK_DURATION=%.0fs SAMPLE_FPS=%.1f TARGET_RES=%dx%d JPEG_QUALITY=%d",
+    BRIGHTNESS_THRESHOLD, MOTION_THRESHOLD, CHUNK_DURATION_SEC,
+    SAMPLE_FPS, TARGET_WIDTH, TARGET_HEIGHT, JPEG_QUALITY,
+)
+
+# --------------------------------------------------------------------------
 # Storage Paths: /tmp/video_audit (with cross-platform fallback)
 # --------------------------------------------------------------------------
 if os.name == 'posix':
@@ -162,7 +180,7 @@ else:
     UPLOAD_DIR = Path(tempfile.gettempdir()) / "video_audit"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-logger.info(f"Sentinel Video Storage Directory: {UPLOAD_DIR}")
+logger.info("Sentinel Video Storage Directory: %s", UPLOAD_DIR)
 
 # --------------------------------------------------------------------------
 # Schemas
@@ -252,10 +270,8 @@ class VideoChunkProcessor:
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         cap.release()
 
-        logger.info(
-            f"Video Loaded: '{original_filename}' | Duration: {duration_sec:.2f}s | "
-            f"FPS: {fps:.2f} | Frames: {total_frames} | Res: {width}x{height}"
-        )
+        logger.info("Video Loaded: '%s' | Duration: %.2fs | FPS: %.2f | Frames: %d | Res: %dx%d",
+            original_filename, duration_sec, fps, total_frames, width, height)
 
         num_chunks = max(1, math.ceil(duration_sec / self.chunk_duration_sec)) if duration_sec > 0 else 1
         chunk_mappings: List[ChunkMapping] = []
@@ -273,7 +289,7 @@ class VideoChunkProcessor:
                 )
             )
 
-        logger.info(f"Video partitioned into {num_chunks} chunks of {self.chunk_duration_sec}s each")
+        logger.info("Video partitioned into %d chunks of %.0fs each", num_chunks, self.chunk_duration_sec)
 
         return {
             "duration": duration_sec,
@@ -296,7 +312,7 @@ class VideoChunkProcessor:
         """
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
-            logger.error(f"Failed to open video for keyframe extraction: {video_path}")
+            logger.error("Failed to open video for keyframe extraction: %s", video_path)
             return []
 
         fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
@@ -312,7 +328,7 @@ class VideoChunkProcessor:
         enhanced_count = 0
         skipped_count = 0
 
-        logger.debug(f"Extracting keyframes from frame {start_frame} to {end_frame} at {self.sample_fps} fps")
+        logger.debug("Extracting keyframes from frame %d to %d at %.1f fps", start_frame, end_frame, self.sample_fps)
 
         # Seek ONCE to the start of this chunk, then walk forward sequentially.
         # Calling cap.set(POS_FRAMES) on every sampled frame (the old approach)
@@ -338,7 +354,7 @@ class VideoChunkProcessor:
 
             # --- INPUT VALIDATION ---
             if frame is None or frame.size == 0:
-                logger.warning(f"Skipping corrupted/empty frame at index {current_frame_idx}")
+                logger.warning("Skipping corrupted/empty frame at index %d", current_frame_idx)
                 current_frame_idx += 1
                 continue
 
@@ -355,7 +371,7 @@ class VideoChunkProcessor:
             if frame_is_dark:
                 processed = enhance_frame_full(downscaled)
                 if processed is None:
-                    logger.warning(f"Frame enhancement failed at index {current_frame_idx}, using unenhanced frame")
+                    logger.warning("Frame enhancement failed at index %d, using unenhanced frame", current_frame_idx)
                     processed = downscaled
                 else:
                     enhanced_count += 1
@@ -470,25 +486,54 @@ class LocalSemanticAuditor:
                 )
             )
 
-        logger.info(f"Chunk {chunk.chunk_id}: Found {len(matches)} matches for query '{query}'")
+        logger.info("Chunk %s: Found %d matches for query '%s'", chunk.chunk_id, len(matches), query)
         return matches
 
 
 # --------------------------------------------------------------------------
 # API Endpoints
 # --------------------------------------------------------------------------
-processor = VideoChunkProcessor(chunk_duration_sec=60.0, sample_fps=1.0)
+processor = VideoChunkProcessor(
+    chunk_duration_sec=CHUNK_DURATION_SEC,
+    sample_fps=SAMPLE_FPS,
+    motion_threshold=MOTION_THRESHOLD,
+    target_width=TARGET_WIDTH,
+    target_height=TARGET_HEIGHT,
+    jpeg_quality=JPEG_QUALITY,
+    brightness_threshold=BRIGHTNESS_THRESHOLD,
+)
 auditor = LocalSemanticAuditor()
 
 @app.get("/api/health")
 async def health_check():
+    """Expanded health check with model status and device info."""
+    import torch
+    model_info = {}
+    if _zero_dce_model is not None:
+        device = next(_zero_dce_model.parameters()).device
+        model_info = {
+            "zero_dce_device": str(device),
+            "zero_dce_params": sum(p.numel() for p in _zero_dce_model.parameters()),
+        }
+
     return {
         "status": "healthy",
         "service": "sentinel-video-audit-local",
         "storage_path": str(UPLOAD_DIR),
         "opencv_version": cv2.__version__,
+        "torch_version": torch.__version__,
+        "cuda_available": torch.cuda.is_available(),
         "backend": "python-fastapi",
-        "zero_dce_available": _zero_dce_model is not None
+        "zero_dce_available": _zero_dce_model is not None,
+        **model_info,
+        "config": {
+            "brightness_threshold": BRIGHTNESS_THRESHOLD,
+            "motion_threshold": MOTION_THRESHOLD,
+            "chunk_duration_sec": CHUNK_DURATION_SEC,
+            "sample_fps": SAMPLE_FPS,
+            "target_resolution": f"{TARGET_WIDTH}x{TARGET_HEIGHT}",
+            "jpeg_quality": JPEG_QUALITY,
+        },
     }
 
 @app.post("/api/upload")
@@ -515,7 +560,7 @@ async def upload_video(file: UploadFile = File(...)):
             buffer.write(chunk)
             total_bytes += len(chunk)
 
-    logger.info(f"Spooled upload: {file.filename} -> {dest_path} ({total_bytes / (1024*1024):.2f} MB)")
+    logger.info("Spooled upload: %s -> %s (%.2f MB)", file.filename, dest_path, total_bytes / (1024*1024))
 
     # Extract video duration via OpenCV
     duration = 0.0
@@ -526,7 +571,7 @@ async def upload_video(file: UploadFile = File(...)):
         duration = frames / fps if frames > 0 else 0.0
         cap.release()
     except Exception as e:
-        logger.warning(f"Metadata extraction warning: {e}")
+        logger.warning("Metadata extraction warning: %s", e, exc_info=True)
 
     return {
         "video_id": dest_filename,
@@ -586,7 +631,7 @@ async def analyze_video(
         frame_scores.sort(key=lambda x: x[0])
         diagnostics = _smoother.get_diagnostics(frame_scores)
         smoothed_clips = diagnostics.get("clips", [])
-        logger.info(f"Temporal smoothing produced {len(smoothed_clips)} clips")
+        logger.info("Temporal smoothing produced %d clips", len(smoothed_clips))
 
     response = AuditResponseSchema(
         matches=all_matches,
@@ -635,7 +680,7 @@ async def cut_video_clip(
             detail=f"Clip extraction failed ({result.method}): {result.error}"
         )
 
-    logger.info(f"Clip extracted: {clip_id} from {video_id} ({start}s - {end}s)")
+    logger.info("Clip extracted: %s from %s (%.1fs - %.1fs)", clip_id, video_id, start, end)
 
     return {
         "clip_id": clip_id,
@@ -704,7 +749,7 @@ async def analyze_video_stream(
             yield f"data: {json.dumps(final_payload)}\n\n"
 
         except Exception as e:
-            logger.error(f"Error in video analysis stream: {e}", exc_info=True)
+            logger.error("Error in video analysis stream: %s", e, exc_info=True)
             yield f"data: {json.dumps({'status': 'error', 'progress': 0, 'message': f'Processing error: {str(e)}' })}\n\n"
 
     return StreamingResponse(
