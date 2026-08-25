@@ -79,11 +79,13 @@ api = FastAPI(
     version="2.0.0",
 )
 
+ALLOWED_ORIGINS = os.environ.get("CORS_ORIGINS", "http://localhost:3000").split(",")
+
 api.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
     allow_headers=["*"],
 )
 
@@ -189,7 +191,7 @@ async def _run_search_pipeline(
     # --- Step 2: Chunk & extract keyframes ---
     meta = processor.inspect_and_chunk(str(video_path), video_id)
     chunks = meta["chunks"]
-    logger.info(f"Video '{video_id}': {meta['duration']:.1f}s, {len(chunks)} chunk(s)")
+    logger.info("Video '%s': %.1fs, %d chunk(s)", video_id, meta['duration'], len(chunks))
 
     # --- Step 3: Run auditor per chunk ---
     all_matches: List[MatchItem] = []
@@ -290,7 +292,7 @@ async def search_video(request: SearchRequest):
     Accepts a natural-language query and a video_id (from prior upload).
     Returns smoothed, continuous clip ranges with confidence scores.
     """
-    logger.info(f"Search request: query='{request.query}', video_id='{request.video_id}'")
+    logger.info("Search request: query='%s', video_id='%s'", request.query, request.video_id)
     result = await _run_search_pipeline(request.video_id, request.query, request.top_k)
     return result
 
@@ -304,7 +306,7 @@ async def search_video_form(
     """
     Form-encoded variant of /api/search for browser/multipart clients.
     """
-    logger.info(f"Search (form) request: query='{query}', video_id='{video_id}'")
+    logger.info("Search (form) request: query='%s', video_id='%s'", query, video_id)
     result = await _run_search_pipeline(video_id, query, top_k)
     return result
 
@@ -324,7 +326,7 @@ async def cut_clip(request: ClipRequest):
     if request.start >= request.end:
         raise HTTPException(status_code=400, detail="'start' must be less than 'end'.")
 
-    logger.info(f"Clip request: video='{request.video_id}', {request.start}s → {request.end}s")
+    logger.info("Clip request: video='%s', %.1fs -> %.1fs", request.video_id, request.start, request.end)
 
     clip_id = f"clip_{uuid.uuid4().hex[:8]}"
     output_filename = f"{clip_id}_{request.start:.1f}s_{request.end:.1f}s.mp4"
@@ -436,9 +438,9 @@ if __name__ == "__main__":
     logger.info("=" * 60)
     logger.info("  TraceVision API v2.0 — Search, Smooth & Clip Pipeline")
     logger.info("=" * 60)
-    logger.info(f"  Storage:  {UPLOAD_DIR}")
-    logger.info(f"  FFmpeg:   {'Available' if cutter.ffmpeg_available else 'NOT FOUND (OpenCV fallback)'}")
-    logger.info(f"  VRAM Cap: {monitor.vram_ceiling_mb:.0f} MB")
+    logger.info("  Storage:  %s", UPLOAD_DIR)
+    logger.info("  FFmpeg:   %s", "Available" if cutter.ffmpeg_available else "NOT FOUND (OpenCV fallback)")
+    logger.info("  VRAM Cap: %.0f MB", monitor.vram_ceiling_mb)
     logger.info("=" * 60)
 
     uvicorn.run(api, host="0.0.0.0", port=8000)
