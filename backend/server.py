@@ -105,6 +105,18 @@ def enhance_frame_full(frame: np.ndarray) -> Optional[np.ndarray]:
         return None
 
 
+def is_frame_dark(frame: np.ndarray, brightness_threshold: float = 90.0) -> bool:
+    """
+    Cheap check for whether a frame is dark enough to need enhancement at all.
+    Runs on an already-tiny frame so this costs almost nothing next to actually
+    running CLAHE/Zero-DCE. Mean brightness is on a 0-255 scale — ~90 is a
+    reasonable "starts looking dim" cutoff; raise it if daylight clips are being
+    flagged as dark, lower it if dim clips are being skipped.
+    """
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
+    return float(np.mean(gray)) < brightness_threshold
+
+
 def match_query_keyword(query: str, keywords: List[str]) -> bool:
     """
     Match keywords with word boundaries to avoid substring matches.
@@ -200,7 +212,8 @@ class VideoChunkProcessor:
         motion_threshold: float = 8.0,
         target_width: int = 640,
         target_height: int = 360,
-        jpeg_quality: int = 75
+        jpeg_quality: int = 75,
+        brightness_threshold: float = 90.0
     ):
         """
         Initializes video chunk processor with configurable parameters.
@@ -212,6 +225,9 @@ class VideoChunkProcessor:
             target_width: Target width for downscaling
             target_height: Target height for downscaling
             jpeg_quality: JPEG compression quality (0-100)
+            brightness_threshold: Mean grayscale brightness (0-255) below which a
+                frame is considered "dark" and gets CLAHE/Zero-DCE enhancement.
+                Bright frames skip enhancement entirely to save processing time.
         """
         self.chunk_duration_sec = chunk_duration_sec
         self.sample_fps = sample_fps
@@ -219,6 +235,7 @@ class VideoChunkProcessor:
         self.target_width = target_width
         self.target_height = target_height
         self.jpeg_quality = jpeg_quality
+        self.brightness_threshold = brightness_threshold
 
     def inspect_and_chunk(self, video_path: str, original_filename: str) -> Dict[str, Any]:
         """
@@ -290,34 +307,66 @@ class VideoChunkProcessor:
         sampled_keyframes = []
         prev_gray_small = None
         current_frame_idx = start_frame
+        next_sample_idx = start_frame
         encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), self.jpeg_quality]
+        enhanced_count = 0
+        skipped_count = 0
 
         logger.debug(f"Extracting keyframes from frame {start_frame} to {end_frame} at {self.sample_fps} fps")
 
+        # Seek ONCE to the start of this chunk, then walk forward sequentially.
+        # Calling cap.set(POS_FRAMES) on every sampled frame (the old approach)
+        # forces a re-seek to the nearest keyframe each time, which is far
+        # slower than sequentially grabbing (not decoding) frames we don't need.
+        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+
         while current_frame_idx <= end_frame:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, current_frame_idx)
-            ret, frame = cap.read()
+            if current_frame_idx == next_sample_idx:
+                ret, frame = cap.read()
+            else:
+                ret = cap.grab()  # cheap: advances the stream without a full decode
+                frame = None
+
             if not ret:
                 break
+
+            if current_frame_idx != next_sample_idx:
+                current_frame_idx += 1
+                continue
+
+            next_sample_idx += frame_interval
 
             # --- INPUT VALIDATION ---
             if frame is None or frame.size == 0:
                 logger.warning(f"Skipping corrupted/empty frame at index {current_frame_idx}")
-                current_frame_idx += frame_interval
+                current_frame_idx += 1
                 continue
 
-            # --- ENHANCEMENT PIPELINE ---
-            enhanced_frame = enhance_frame_full(frame)
-            if enhanced_frame is None:
-                logger.warning(f"Frame enhancement failed at index {current_frame_idx}, using original")
-                enhanced_frame = frame
+            # Downscale FIRST — enhancement then runs on ~640x360 pixels instead
+            # of the original resolution, which is where most of the CPU time
+            # in Zero-DCE actually goes. Output quality at this size is still
+            # plenty for motion scoring and the detection pipeline.
+            downscaled = cv2.resize(frame, (self.target_width, self.target_height))
 
-            # Downscale for model ingestion and motion delta computation
-            downscaled = cv2.resize(enhanced_frame, (self.target_width, self.target_height))
+            # --- CONDITIONAL ENHANCEMENT: only run CLAHE/Zero-DCE if the frame
+            # is actually dark. Well-lit daytime frames skip both entirely,
+            # which is the main lever for cutting overall processing time. ---
+            frame_is_dark = is_frame_dark(downscaled, self.brightness_threshold)
+            if frame_is_dark:
+                processed = enhance_frame_full(downscaled)
+                if processed is None:
+                    logger.warning(f"Frame enhancement failed at index {current_frame_idx}, using unenhanced frame")
+                    processed = downscaled
+                else:
+                    enhanced_count += 1
+            else:
+                processed = downscaled
+                skipped_count += 1
+
             timestamp_sec = round(current_frame_idx / fps, 2)
 
             # Grayscale for rapid inter-frame motion diff
-            gray_motion = cv2.resize(cv2.cvtColor(enhanced_frame, cv2.COLOR_BGR2GRAY), (160, 90))
+            gray_motion = cv2.resize(cv2.cvtColor(processed, cv2.COLOR_BGR2GRAY), (160, 90))
             gray_motion = cv2.GaussianBlur(gray_motion, (5, 5), 0)
 
             motion_score = 0.0
@@ -328,7 +377,7 @@ class VideoChunkProcessor:
             prev_gray_small = gray_motion
 
             # Compress downscaled frame to JPEG byte buffer (avoids memory overflow)
-            _, jpeg_buffer = cv2.imencode('.jpg', downscaled, encode_param)
+            _, jpeg_buffer = cv2.imencode('.jpg', processed, encode_param)
 
             sampled_keyframes.append({
                 "frame_idx": current_frame_idx,
@@ -336,13 +385,17 @@ class VideoChunkProcessor:
                 "relative_sec": round(timestamp_sec - start_sec, 2),
                 "motion_score": round(motion_score, 2),
                 "has_motion": motion_score > self.motion_threshold,
+                "was_enhanced": frame_is_dark,
                 "jpeg_size_bytes": len(jpeg_buffer)
             })
 
-            current_frame_idx += frame_interval
+            current_frame_idx += 1
 
         cap.release()
-        logger.debug(f"Extracted {len(sampled_keyframes)} keyframes from chunk")
+        logger.debug(
+            f"Extracted {len(sampled_keyframes)} keyframes from chunk "
+            f"({enhanced_count} enhanced as dark, {skipped_count} skipped as bright-enough)"
+        )
         return sampled_keyframes
 
 
@@ -488,7 +541,8 @@ async def analyze_video(
     video_id: Optional[str] = Form(None),
     file: Optional[UploadFile] = File(None),
     query: str = Form(...),
-    chunk_size: Optional[float] = Form(60.0)
+    chunk_size: Optional[float] = Form(60.0),
+    brightness_threshold: Optional[float] = Form(90.0)
 ):
     """
     Analyzes video chunks with enhanced 1fps keyframe extraction & motion filtering.
@@ -504,7 +558,7 @@ async def analyze_video(
     if not target_path or not target_path.exists():
         raise HTTPException(status_code=404, detail=f"Video resource '{video_id}' not found.")
 
-    chunk_proc = VideoChunkProcessor(chunk_duration_sec=chunk_size or 60.0, sample_fps=1.0)
+    chunk_proc = VideoChunkProcessor(chunk_duration_sec=chunk_size or 60.0, sample_fps=1.0, brightness_threshold=brightness_threshold or 90.0)
     meta = chunk_proc.inspect_and_chunk(str(target_path), str(video_id))
     chunks = meta["chunks"]
 
@@ -598,7 +652,8 @@ async def cut_video_clip(
 async def analyze_video_stream(
     video_id: str = Query(...),
     query: str = Query(...),
-    chunk_size: Optional[float] = Query(60.0)
+    chunk_size: Optional[float] = Query(60.0),
+    brightness_threshold: Optional[float] = Query(90.0)
 ):
     """
     SSE stream with 1 fps keyframe extraction progress and global timestamp mapping.
@@ -612,7 +667,7 @@ async def analyze_video_stream(
             yield f"data: {json.dumps({'status': 'extracting', 'progress': 10, 'message': 'Extracting keyframes (1 fps) & downsampling video chunks with Zero-DCE enhancement...'})}\n\n"
             await asyncio.sleep(0.3)
 
-            chunk_proc = VideoChunkProcessor(chunk_duration_sec=chunk_size or 60.0, sample_fps=1.0)
+            chunk_proc = VideoChunkProcessor(chunk_duration_sec=chunk_size or 60.0, sample_fps=1.0, brightness_threshold=brightness_threshold or 90.0)
             meta = chunk_proc.inspect_and_chunk(str(video_path), video_id)
             chunks: List[ChunkMapping] = meta["chunks"]
             total_chunks = len(chunks)
