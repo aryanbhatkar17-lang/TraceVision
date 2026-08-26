@@ -91,7 +91,7 @@ export function QueryBar({
           type="submit"
           disabled={isProcessing || !query.trim() || !hasVideo}
           className={cn(
-            'flex shrink-0 items-center gap-2 rounded-md bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground shadow-[0_0_20px_-4px_var(--primary)] transition-all hover:brightness-110 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40',
+            'flex shrink-0 items-center gap-2 rounded-md bg-blue-600 px-4 py-2.5 text-sm font-semibold text-primary-foreground shadow-[0_0_20px_-4px_var(--primary)] transition-all hover:bg-blue-700 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40',
           )}
         >
           {isProcessing ? (
@@ -113,8 +113,8 @@ export function QueryBar({
           isDragging
             ? 'border-primary bg-primary/10 text-primary'
             : currentFileName
-            ? 'border-primary/40 bg-card text-foreground hover:border-primary/60'
-            : 'border-dashed border-border bg-card text-muted-foreground hover:border-primary/50 hover:text-foreground',
+              ? 'border-primary/40 bg-card text-foreground hover:border-primary/60'
+              : 'border-dashed border-border bg-card text-muted-foreground hover:border-primary/50 hover:text-foreground',
         )}
       >
         <div className="flex items-center gap-2.5 min-w-0 flex-1">

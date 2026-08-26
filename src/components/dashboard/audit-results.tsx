@@ -26,7 +26,7 @@ export function AuditResults({
       {/* Panel Header */}
       <div className="flex h-12 shrink-0 items-center justify-between border-b border-border px-4 bg-card/70 backdrop-blur-md">
         <div className="flex items-center gap-2">
-          <span className="text-primary">
+          <span className="text-blue-600">
             <svg className="size-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
             </svg>
@@ -41,28 +41,28 @@ export function AuditResults({
       {/* Panel Body */}
       <div className="flex-1 overflow-y-auto p-3 space-y-3 scrollbar-thin">
         {isProcessing ? (
-          /* Real-Time Scalable Long-Video Processing Progress */
-          <div className="flex flex-col items-center justify-center p-6 space-y-4 rounded-lg border border-primary/20 bg-primary/5 my-auto text-center animate-in fade-in duration-300">
-            <div className="relative flex size-12 items-center justify-center rounded-full bg-primary/10 border border-primary/40">
-              <Loader2 className="size-6 text-primary animate-spin" />
+          /* Real-Time Processing Progress - Blue Themed */
+          <div className="flex flex-col items-center justify-center p-6 space-y-4 rounded-lg border border-blue-500/20 bg-blue-500/5 my-auto text-center animate-in fade-in duration-300">
+            <div className="relative flex size-12 items-center justify-center rounded-full bg-blue-500/10 border border-blue-500/40">
+              <Loader2 className="size-6 text-blue-600 animate-spin" />
             </div>
 
             <div className="space-y-1.5 w-full max-w-xs">
-              <div className="flex items-center justify-between text-xs font-mono text-primary font-bold">
+              <div className="flex items-center justify-between text-xs font-mono text-blue-600 font-bold">
                 <span>
                   {progress?.status === 'uploading'
                     ? 'UPLOADING'
                     : progress?.status === 'extracting'
-                    ? 'EXTRACTING'
-                    : 'ANALYZING'}
+                      ? 'EXTRACTING'
+                      : 'ANALYZING'}
                 </span>
                 <span>{progress?.progress ?? 35}%</span>
               </div>
-              
+
               {/* Progress Bar */}
               <div className="h-2 w-full rounded-full bg-secondary overflow-hidden border border-border/50">
                 <div
-                  className="h-full bg-primary transition-all duration-300 shadow-[0_0_10px_var(--primary)]"
+                  className="h-full bg-blue-600 transition-all duration-300 shadow-[0_0_10px_rgba(37,99,235,0.4)]"
                   style={{ width: `${progress?.progress ?? 35}%` }}
                 />
               </div>
@@ -99,10 +99,9 @@ export function AuditResults({
             </div>
           </div>
         ) : (
-          /* Clean, Simplified Result Cards (Zero Camera Thumbnail / Full Width) */
+          /* Simplified Result Cards (Tags and Confidence Removed) */
           matches.map((match) => {
             const isSelected = activeMatchId === match.id
-            const cat = (match.category || 'ANOMALY').toUpperCase()
 
             return (
               <div
@@ -119,40 +118,23 @@ export function AuditResults({
                 className={cn(
                   'group relative flex flex-col gap-2 p-3.5 rounded-lg border transition-all cursor-pointer select-none text-left',
                   isSelected
-                    ? 'bg-primary/10 border-primary shadow-[0_0_20px_-5px_rgba(16,185,129,0.3)] ring-1 ring-primary/40'
-                    : 'bg-card/50 border-border hover:border-primary/50 hover:bg-card/90'
+                    ? 'bg-blue-500/10 border-blue-500 shadow-[0_0_20px_-5px_rgba(37,99,235,0.3)] ring-1 ring-blue-500/40'
+                    : 'bg-card/50 border-border hover:border-blue-500/50 hover:bg-card/90'
                 )}
               >
-                {/* Header Row: Timestamp + Category Badge */}
+                {/* Header Row: Timestamp */}
                 <div className="flex items-center justify-between gap-2">
                   <div className="flex items-center gap-1.5">
-                    <span className="font-mono text-xs font-bold tracking-wider text-primary">
+                    <span className="font-mono text-xs font-bold tracking-wider text-blue-600">
                       {match.start_time} – {match.end_time}
                     </span>
                     <span className="font-mono text-[10px] text-muted-foreground/60">
                       ({Math.round(match.start_seconds)}s)
                     </span>
                   </div>
-
-                  <span
-                    className={cn(
-                      'px-2 py-0.5 rounded font-mono text-[10px] font-semibold tracking-wider uppercase border shrink-0',
-                      cat === 'PERSON'
-                        ? 'bg-blue-950/50 text-blue-400 border-blue-800/60'
-                        : cat === 'VEHICLE'
-                        ? 'bg-amber-950/50 text-amber-400 border-amber-800/60'
-                        : cat === 'SECURITY'
-                        ? 'bg-purple-950/50 text-purple-400 border-purple-800/60'
-                        : cat === 'OBJECT'
-                        ? 'bg-cyan-950/50 text-cyan-400 border-cyan-800/60'
-                        : 'bg-rose-950/50 text-rose-400 border-rose-800/60'
-                    )}
-                  >
-                    {cat}
-                  </span>
                 </div>
 
-                {/* Event Description (Expanded to Full Card Width) */}
+                {/* Event Description */}
                 <p className="text-xs text-muted-foreground group-hover:text-foreground leading-relaxed transition-colors">
                   {match.description}
                 </p>
@@ -160,14 +142,11 @@ export function AuditResults({
                 {/* Footer Metadata & Seek Prompt */}
                 <div className="flex items-center justify-between pt-1 border-t border-border/40 text-[10px] font-mono text-muted-foreground/70">
                   <span className="flex items-center gap-1">
-                    {match.confidence && (
-                      <span>{Math.round(match.confidence * 100)}% CONFIDENCE</span>
-                    )}
                     {match.chunk_id && (
-                      <span className="text-muted-foreground/40">• {match.chunk_id}</span>
+                      <span className="text-muted-foreground/40">{match.chunk_id}</span>
                     )}
                   </span>
-                  <span className="flex items-center gap-0.5 text-primary opacity-0 group-hover:opacity-100 transition-opacity">
+                  <span className="flex items-center gap-0.5 text-blue-600 opacity-0 group-hover:opacity-100 transition-opacity">
                     Seek to frame <ArrowUpRight className="size-3" />
                   </span>
                 </div>
