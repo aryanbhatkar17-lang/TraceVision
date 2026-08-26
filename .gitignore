@@ -40,5 +40,14 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
-#local build caches
+# local build caches
 .freebuff/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pth
+
+# Model weights (download separately)
+backend/Epoch99.pth
