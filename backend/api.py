@@ -20,7 +20,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-
 # ---------------------------------------------------------------------------
 # Ensure backend/ is importable regardless of CWD
 # ---------------------------------------------------------------------------
@@ -60,9 +59,12 @@ api = FastAPI(
     version="2.1.0",
 )
 
+# Merged from upstream/main: Secure CORS handling
+ALLOWED_ORIGINS = os.environ.get("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
+
 api.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -73,6 +75,8 @@ api.add_middleware(
 # ---------------------------------------------------------------------------
 monitor = HardwareMonitor(vram_ceiling_mb=6144.0, warning_threshold=0.80)
 cutter = ClipCutter(output_dir=UPLOAD_DIR / "clips")
+
+# Kept YOUR perfected smoother configuration
 smoother = TemporalSmoother(
     threshold=0.01,
     tolerance_window=2,
@@ -92,12 +96,10 @@ class SearchRequest(BaseModel):
     video_id: str = Field(..., description="Filename of the uploaded video")
     top_k: int = Field(default=10, ge=1, le=50, description="Max number of clip results")
 
-
 class ClipRequest(BaseModel):
     video_id: str = Field(..., description="Filename of the uploaded video")
     start: float = Field(..., ge=0.0, description="Clip start time in seconds")
     end: float = Field(..., gt=0.0, description="Clip end time in seconds")
-
 
 class ClipResponse(BaseModel):
     clip_id: str
@@ -110,7 +112,6 @@ class ClipResponse(BaseModel):
     file_size_bytes: int
     download_url: str
 
-
 # ---------------------------------------------------------------------------
 # Bridge: real pipeline output -> frontend-compatible response shape
 # ---------------------------------------------------------------------------
@@ -118,24 +119,16 @@ def _pipeline_result_to_response(video_id: str, pipeline_result: dict) -> dict:
     diagnostics = pipeline_result.get("clips") or {}
     smoothed_clips = diagnostics.get("clips", [])
 
-    # pipeline.py's "matches" already carries Gemini's real per-frame
-    # reasoning (frontend_matches), keyed by timestamp. Use it to give each
-    # smoothed clip a genuine AI justification instead of a generic label —
-    # this is the evidence an officer actually needs to trust a hit.
     per_frame = pipeline_result.get("matches") or []
-
     matches = []
     for idx, c in enumerate(smoothed_clips):
         start_sec = c["start"]
         end_sec = c["end"]
 
-        # If it's a single isolated frame, expand it into a 2-second snippet
+        # Expand isolated frames
         if start_sec == end_sec:
             end_sec += 2.0
 
-        # Find the frame(s) whose timestamp falls inside this clip's range,
-        # pick the highest-confidence one's reasoning as the representative
-        # description.
         frames_in_range = [
             f for f in per_frame
             if start_sec - 0.5 <= f["start_seconds"] <= end_sec + 0.5
@@ -165,9 +158,7 @@ def _pipeline_result_to_response(video_id: str, pipeline_result: dict) -> dict:
         "video_id": video_id,
     }
 
-
 async def _resolve_video_path(video_id: Optional[str], file: Optional[UploadFile]) -> tuple[str, str]:
-    """Shared helper: locate an already-uploaded video, or save a fresh upload."""
     if video_id:
         target_path = UPLOAD_DIR / video_id
         if not target_path.exists():
@@ -180,11 +171,9 @@ async def _resolve_video_path(video_id: Optional[str], file: Optional[UploadFile
     else:
         raise HTTPException(status_code=422, detail="Either 'video_id' or 'file' must be provided.")
 
-
 # ---------------------------------------------------------------------------
 # API Endpoints
 # ---------------------------------------------------------------------------
-
 @api.get("/api/health")
 async def health_check():
     snapshot = monitor.check_resources()
@@ -197,15 +186,9 @@ async def health_check():
         "hardware": snapshot.to_dict(),
     }
 
-
 @api.post("/api/search")
 async def search_video(request: SearchRequest):
-    """
-    THE REAL PIPELINE ENTRY POINT.
-    Text search -> CLIP retrieval -> Gemini validation -> smoothed clips.
-    """
     logger.info(f"[/api/search] query='{request.query}', video_id='{request.video_id}'")
-
     video_path = UPLOAD_DIR / request.video_id
     if not video_path.exists():
         raise HTTPException(status_code=404, detail=f"Video '{request.video_id}' not found.")
@@ -213,13 +196,10 @@ async def search_video(request: SearchRequest):
     if not monitor.is_safe_to_proceed(required_mb=500):
         raise HTTPException(status_code=503, detail="VRAM ceiling exceeded. Try again later.")
 
-    # Correct call: (video_path, query, smoother) — NOT top_k in the 3rd slot.
     pipeline_result = await _run_search_pipeline(str(video_path), request.query, smoother)
-
     response = _pipeline_result_to_response(request.video_id, pipeline_result)
     response["matches"] = response["matches"][: request.top_k]
     return response
-
 
 @api.post("/api/search/form")
 async def search_video_form(
@@ -228,7 +208,6 @@ async def search_video_form(
     top_k: int = Form(10),
 ):
     logger.info(f"[/api/search/form] query='{query}', video_id='{video_id}'")
-
     video_path = UPLOAD_DIR / video_id
     if not video_path.exists():
         raise HTTPException(status_code=404, detail=f"Video '{video_id}' not found.")
@@ -238,7 +217,6 @@ async def search_video_form(
     response["matches"] = response["matches"][:top_k]
     return response
 
-
 @api.post("/api/analyze")
 async def analyze_video_real(
     video_id: Optional[str] = Form(None),
@@ -247,11 +225,6 @@ async def analyze_video_real(
     duration: Optional[float] = Form(None),
     chunk_size: Optional[float] = Form(60.0),
 ):
-    """
-    THIS is almost certainly the endpoint your frontend's "Analyze" button
-    is calling. It now runs the real CLIP + Gemini pipeline instead of the
-    old keyword-matching mock in server.py.
-    """
     target_path, resolved_video_id = await _resolve_video_path(video_id, file)
     logger.info(f"[/api/analyze] query='{query}', video_id='{resolved_video_id}'")
 
@@ -261,18 +234,12 @@ async def analyze_video_real(
     pipeline_result = await _run_search_pipeline(target_path, query, smoother)
     return _pipeline_result_to_response(resolved_video_id, pipeline_result)
 
-
 @api.api_route("/api/analyze/stream", methods=["GET", "POST"])
 async def analyze_video_stream_real(
     video_id: str = Query(...),
     query: str = Query(...),
     chunk_size: Optional[float] = Query(60.0),
 ):
-    """
-    SSE variant, now backed by the real pipeline. Progress events are
-    coarse (the pipeline itself doesn't emit granular progress), but the
-    final payload is genuine CLIP+Gemini output, not the mock.
-    """
     video_path = UPLOAD_DIR / video_id
     if not video_path.exists():
         raise HTTPException(status_code=404, detail=f"Video ID '{video_id}' not found.")
@@ -281,10 +248,8 @@ async def analyze_video_stream_real(
         try:
             yield f"data: {json.dumps({'status': 'extracting', 'progress': 15, 'message': 'Extracting frames at 1 fps...'})}\n\n"
             await asyncio.sleep(0.2)
-
             yield f"data: {json.dumps({'status': 'analyzing', 'progress': 35, 'message': 'Running CLIP retrieval...'})}\n\n"
             await asyncio.sleep(0.2)
-
             yield f"data: {json.dumps({'status': 'analyzing', 'progress': 65, 'message': 'Validating candidates with Gemini...'})}\n\n"
 
             pipeline_result = await _run_search_pipeline(str(video_path), query, smoother)
@@ -294,7 +259,6 @@ async def analyze_video_stream_real(
 
             final_payload = _pipeline_result_to_response(video_id, pipeline_result)
             yield f"data: {json.dumps(final_payload)}\n\n"
-
         except Exception as e:
             logger.error(f"Error in analyze stream: {e}", exc_info=True)
             yield f"data: {json.dumps({'status': 'error', 'progress': 0, 'message': f'Processing error: {str(e)}'})}\n\n"
@@ -304,7 +268,6 @@ async def analyze_video_stream_real(
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
     )
-
 
 @api.post("/api/clip")
 async def cut_clip(request: ClipRequest):
@@ -338,7 +301,6 @@ async def cut_clip(request: ClipRequest):
         download_url=f"/api/clip/download/{output_filename}",
     ).model_dump()
 
-
 @api.get("/api/clip/download/{filename}")
 async def download_clip(filename: str):
     clip_path = UPLOAD_DIR / "clips" / filename
@@ -351,7 +313,6 @@ async def download_clip(filename: str):
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
-
 @api.get("/api/hardware")
 async def hardware_status():
     snapshot = monitor.check_resources()
@@ -361,7 +322,6 @@ async def hardware_status():
         "safe_to_proceed": monitor.is_safe_to_proceed(),
         "ffmpeg_available": cutter.ffmpeg_available,
     }
-
 
 @api.post("/api/clip/batch")
 async def cut_clips_batch(
@@ -385,17 +345,13 @@ async def cut_clips_batch(
         "clips": [r.to_dict() for r in results],
     }
 
-
 # ---------------------------------------------------------------------------
-# Mount existing server.py endpoints (kept for reference / legacy access only —
-# NOT used by /api/analyze or /api/search anymore)
+# Mount existing server.py endpoints
 # ---------------------------------------------------------------------------
 api.mount("/legacy", server_app)
 
 from server import upload_video
-
 api.post("/api/upload")(upload_video)
-
 
 # ---------------------------------------------------------------------------
 # Entry Point
