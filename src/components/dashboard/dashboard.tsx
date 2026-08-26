@@ -9,15 +9,15 @@ import { AuditResults } from './audit-results'
 import { AuditMatch, TimelineMarker, AnalysisProgress, AuditResponse } from '@/types/audit'
 import { ShieldCheck, RotateCcw } from 'lucide-react'
 
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:8000'
+
 export default function Dashboard() {
-  // Video & Playback State
   const [videoFile, setVideoFile] = useState<File | null>(null)
   const [videoUrl, setVideoUrl] = useState<string | null>(null)
   const [videoDuration, setVideoDuration] = useState<number>(0)
   const [currentTime, setCurrentTime] = useState<number>(0)
   const [isPlaying, setIsPlaying] = useState<boolean>(false)
 
-  // Incident & Analysis State
   const [matches, setMatches] = useState<AuditMatch[]>([])
   const [markers, setMarkers] = useState<TimelineMarker[]>([])
   const [activeMatchId, setActiveMatchId] = useState<string | null>(null)
@@ -25,7 +25,6 @@ export default function Dashboard() {
   const [progress, setProgress] = useState<AnalysisProgress | null>(null)
   const abortControllerRef = useRef<AbortController | null>(null)
 
-  // Clear any residual session / local state on initial mount
   useEffect(() => {
     try {
       if (typeof window !== 'undefined') {
@@ -37,7 +36,6 @@ export default function Dashboard() {
     }
   }, [])
 
-  // Clean up Object URL on unmount or file change
   useEffect(() => {
     return () => {
       if (videoUrl && videoUrl.startsWith('blob:')) {
@@ -46,7 +44,6 @@ export default function Dashboard() {
     }
   }, [videoUrl])
 
-  // Handle Video File Upload
   const handleFileUpload = useCallback((file: File) => {
     const MAX_SIZE_BYTES = 500 * 1024 * 1024
     if (file.size > MAX_SIZE_BYTES) {
@@ -68,7 +65,6 @@ export default function Dashboard() {
     setProgress(null)
   }, [videoUrl])
 
-  // Reset Everything
   const handleReset = useCallback(() => {
     if (videoUrl && videoUrl.startsWith('blob:')) {
       URL.revokeObjectURL(videoUrl)
@@ -84,31 +80,26 @@ export default function Dashboard() {
     setProgress(null)
   }, [videoUrl])
 
-  // Handle Seeking & Playhead Synchronization
   const handleSeek = useCallback((seconds: number) => {
     setCurrentTime(seconds)
   }, [])
 
-  // Handle Timeline Marker Click
   const handleSelectMarker = useCallback((id: string, seconds: number) => {
     setActiveMatchId(id)
     setCurrentTime(seconds)
     setIsPlaying(true)
   }, [])
 
-  // Handle Audit Result Card Click
   const handleSelectMatch = useCallback((id: string, startSeconds: number) => {
     setActiveMatchId(id)
     setCurrentTime(startSeconds)
     setIsPlaying(true)
   }, [])
 
-  // Handle Video Play / Pause Toggle
   const handlePlayPause = useCallback(() => {
     setIsPlaying((prev) => !prev)
   }, [])
 
-  // Cancel Analysis
   const handleCancelAnalysis = useCallback(() => {
     if (abortControllerRef.current) {
       abortControllerRef.current.abort()
@@ -122,19 +113,23 @@ export default function Dashboard() {
     })
   }, [])
 
-  // Execute Video Analysis Pipeline
   const handleAnalyze = async (query: string) => {
     if (!videoFile && !videoUrl) {
       alert('Please load a video recording first.')
       return
     }
 
+    // Reset markers immediately when a new query starts, even on the same video
+    setMatches([])
+    setMarkers([])
+    setActiveMatchId(null)
+
     setIsProcessing(true)
     const abortController = new AbortController()
     abortControllerRef.current = abortController
 
-    let uploadTimer: NodeJS.Timeout | null = null
-    let extractTimer: NodeJS.Timeout | null = null
+    let uploadTimer: ReturnType<typeof setTimeout> | null = null
+    let extractTimer: ReturnType<typeof setTimeout> | null = null
 
     try {
       const dur = videoDuration || 120
@@ -177,13 +172,11 @@ export default function Dashboard() {
       }
 
       const formData = new FormData()
-      formData.append('video', fileToSend)
       formData.append('file', fileToSend)
       formData.append('query', query)
       formData.append('duration', dur.toString())
-      formData.append('fileName', fileToSend.name)
 
-      const response = await fetch('/api/analyze', {
+      const response = await fetch(`${API_BASE}/api/analyze`, {
         method: 'POST',
         body: formData,
         signal: abortController.signal,
@@ -194,7 +187,7 @@ export default function Dashboard() {
 
       if (!response.ok) {
         const errJson = await response.json().catch(() => ({}))
-        throw new Error(errJson.error || `Server returned ${response.status}:${response.statusText}`)
+        throw new Error(errJson.detail || errJson.error || `Server returned ${response.status}: ${response.statusText}`)
       }
 
       const data: AuditResponse = await response.json()
@@ -202,18 +195,13 @@ export default function Dashboard() {
 
       const totalDur = videoDuration || data.video_duration || dur
       const generatedMarkers: TimelineMarker[] = returnedMatches.map((m) => {
-        const cat = (m.category || 'ANOMALY').toUpperCase()
-        let color: 'primary' | 'accent' | 'destructive' = 'primary'
-        if (cat === 'VEHICLE') color = 'accent'
-        if (cat === 'ANOMALY' || cat === 'SECURITY') color = 'destructive'
-
         return {
           id: m.id,
           position: totalDur > 0 ? (m.start_seconds / totalDur) * 100 : 0,
           seconds: m.start_seconds,
           label: m.description,
-          color,
-          category: cat,
+          color: 'primary', // Always green colored timeline markers
+          category: (m.category || 'ANOMALY').toUpperCase(),
         }
       })
 
@@ -250,7 +238,6 @@ export default function Dashboard() {
 
   return (
     <div className="min-h-screen bg-[#f0f4f8] text-slate-900 flex flex-col font-sans selection:bg-blue-100 selection:text-blue-900">
-
       {/* 1. Integrated Header */}
       <header className="sticky top-0 z-50 bg-white/70 backdrop-blur-xl border-b border-slate-200/90 shadow-[0_4px_20px_rgba(0,0,0,0.03)] px-6 lg:px-10 h-14 flex items-center justify-between">
         <Link href="/" className="flex items-center space-x-3 group">
@@ -290,8 +277,6 @@ export default function Dashboard() {
 
       {/* 2. Main Workbench Area */}
       <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-8 space-y-4">
-
-        {/* Search Query Controller */}
         <QueryBar
           onAnalyze={handleAnalyze}
           onFileUpload={handleFileUpload}
@@ -301,10 +286,7 @@ export default function Dashboard() {
           currentFileName={videoFile?.name}
         />
 
-        {/* Video Canvas & Evidence Results Grid */}
         <div className="grid grid-cols-1 gap-5 lg:grid-cols-[minmax(0,1fr)_380px] items-start">
-
-          {/* Video Player / Light-Greyish Empty Box */}
           <div className="w-full">
             <VideoPlayer
               videoUrl={videoUrl}
@@ -323,7 +305,6 @@ export default function Dashboard() {
             />
           </div>
 
-          {/* Evidence Incident Log */}
           <div className="w-full sticky top-20">
             <AuditResults
               matches={matches}
@@ -334,7 +315,6 @@ export default function Dashboard() {
               onCancel={handleCancelAnalysis}
             />
           </div>
-
         </div>
       </main>
     </div>
