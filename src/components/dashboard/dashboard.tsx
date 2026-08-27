@@ -11,7 +11,7 @@ import { preloadFFmpeg } from '@/lib/ffmpeg-preload'
 import { compressVideo } from '@/lib/compress'
 import { ShieldCheck, RotateCcw } from 'lucide-react'
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:8000'
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 
 export default function Dashboard() {
   const [videoFile, setVideoFile] = useState<File | null>(null)
