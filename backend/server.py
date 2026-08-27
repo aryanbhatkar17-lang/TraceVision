@@ -10,8 +10,38 @@ import shutil
 import subprocess
 import tempfile
 import numpy as np
+from PIL import Image
 from pathlib import Path
 from hashlib import sha256
+from dotenv import load_dotenv
+
+# Configure logging FIRST — everything below logs during module load,
+# so logger must exist before any logger.info()/error() call runs.
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger("sentinel-backend")
+
+# --------------------------------------------------------------------------
+# Load environment variables. Check '.env' first (standard convention),
+# then fall back to '.env.local' (Next.js convention) — either may be
+# present depending on how the project was scaffolded.
+# --------------------------------------------------------------------------
+_BACKEND_DIR = Path(__file__).resolve().parent
+_ENV_CANDIDATES = [_BACKEND_DIR / ".env", _BACKEND_DIR / ".env.local"]
+
+_env_path_used = None
+_env_loaded = False
+for _candidate in _ENV_CANDIDATES:
+    if _candidate.exists():
+        _env_loaded = load_dotenv(dotenv_path=_candidate, encoding="utf-8-sig", override=True)
+        _env_path_used = _candidate
+        break
+
+logger.info(
+    f".env lookup -> checked: {[str(p) for p in _ENV_CANDIDATES]} | "
+    f"found: {_env_path_used} | load_dotenv() succeeded: {_env_loaded}"
+)
+
+from google import genai
 from typing import List, Dict, Any, Optional, AsyncGenerator
 
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Query, Request
@@ -19,9 +49,31 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger("sentinel-backend")
+# --------------------------------------------------------------------------
+# Gemini client (new google-genai SDK — google-generativeai is deprecated
+# and gemini-1.5-flash is retired; use current GA model names).
+# --------------------------------------------------------------------------
+_GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
+logger.info(
+    f"GEMINI_API_KEY status: {'FOUND (' + str(len(_GEMINI_API_KEY)) + ' chars)' if _GEMINI_API_KEY else 'EMPTY / NOT SET'}"
+)
+if not _GEMINI_API_KEY:
+    raise RuntimeError(
+        f"GEMINI_API_KEY is not set. Checked for a key in: "
+        f"{[str(p) for p in _ENV_CANDIDATES]}. Create a file named '.env' "
+        "(or '.env.local') in the backend folder containing:\n"
+        "    GEMINI_API_KEY=your_actual_key_here\n"
+        "Get a key at https://ai.google.dev/gemini-api/docs/api-key"
+    )
+
+_gemini_client = genai.Client(api_key=_GEMINI_API_KEY)
+TRANSLATION_MODEL = "gemini-3.5-flash-lite"
+# gemini-2.5-flash returns 404 for this account ("no longer available to
+# new users") — gemini-3.6-flash is the only validation model actually
+# reachable here. Its free tier is capped at 5 requests/minute, so
+# pipeline.py's CLIP_TOP_K is set to 5 to stay under that ceiling by
+# design rather than relying on retries to bail us out every time.
+VALIDATION_MODEL = "gemini-3.5-flash-lite"
 
 # --------------------------------------------------------------------------
 # Optional integrations — imported with graceful fallback so server.py
@@ -296,7 +348,7 @@ class VideoChunkProcessor:
         duration_sec = total_frames / fps if total_frames > 0 else 0.0
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        
+
         cap.release()
 
         logger.info(
@@ -365,7 +417,7 @@ class VideoChunkProcessor:
 
             # Downsample for model ingestion and motion delta
             downscaled = cv2.resize(frame, (self.target_width, self.target_height))
-            
+
             # Grayscale for rapid inter-frame motion diff
             gray_motion = cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), (160, 90))
             gray_motion = cv2.GaussianBlur(gray_motion, (5, 5), 0)
@@ -403,6 +455,11 @@ class SemanticVideoAuditor:
     def __init__(self):
         self.gemini_api_key = os.environ.get("GEMINI_API_KEY", "")
 
+    # ------------------------------------------------------------------
+    # LEGACY heuristic path (keyword + motion clustering). Kept for
+    # /legacy/api/analyze compatibility only — the real pipeline
+    # (pipeline.py -> validate_frames below) does NOT call this.
+    # ------------------------------------------------------------------
     async def analyze_chunk(
         self,
         chunk: ChunkMapping,
@@ -429,7 +486,6 @@ class SemanticVideoAuditor:
         # Filter prominent activity frames
         motion_frames = [f for f in sampled_keyframes if f.get("motion_score", 0) > 8.0]
         if not motion_frames:
-            # Fallback to distributed frames in chunk
             motion_frames = sampled_keyframes[len(sampled_keyframes)//4 : len(sampled_keyframes)*3//4] if sampled_keyframes else []
 
         if motion_frames:
@@ -448,7 +504,7 @@ class SemanticVideoAuditor:
             for idx, clust in enumerate(clusters[:3]):
                 start_sec = max(chunk.start_second, clust[0]["timestamp_sec"])
                 end_sec = min(chunk.end_second, max(start_sec + 3.0, clust[-1]["timestamp_sec"] + 2.0))
-                
+
                 if "delivery" in q_lower or "backpack" in q_lower:
                     desc = f"Subject matching delivery profile with equipment identified near perimeter walkway ({format_timestamp(start_sec)})."
                     category = "PERSON"
@@ -496,6 +552,82 @@ class SemanticVideoAuditor:
 
         return matches
 
+    # ------------------------------------------------------------------
+    # REAL pipeline path — Stage 3 of pipeline.py's CLIP+Gemini RAG flow.
+    # ------------------------------------------------------------------
+    # Caps concurrent Gemini calls so we don't blow past free-tier RPM
+    # limits by firing every candidate frame at once.
+    _validation_semaphore = asyncio.Semaphore(2)
+
+    async def validate_frames(self, frame_paths: List[str], original_query: str) -> List[Dict[str, Any]]:
+        """
+        Sends each CLIP candidate frame + the officer's ORIGINAL raw query
+        to Gemini multimodal for a strict true/false spatial judgment.
+        Frames are validated with bounded concurrency (see semaphore above)
+        since firing all of them at once easily exceeds free-tier RPM.
+        """
+        tasks = [self._validate_single_frame(p, original_query) for p in frame_paths]
+        return await asyncio.gather(*tasks)
+
+    async def _validate_single_frame(
+        self, frame_path: str, original_query: str, max_retries: int = 2
+    ) -> Dict[str, Any]:
+        prompt = (
+            "You are assisting a police officer reviewing CCTV footage. "
+            "Look carefully at this single frame and answer strictly based "
+            "on what is visually present — do not guess or infer beyond "
+            "what you can actually see in the image.\n\n"
+            f"Officer's request: \"{original_query}\"\n\n"
+            "Does this exact frame show what the officer is looking for? "
+            "Respond ONLY with valid JSON, no markdown fences, no extra "
+            "text, in exactly this shape:\n"
+            '{"is_match": true or false, "reasoning": "one short sentence"}'
+        )
+
+        with open(frame_path, "rb") as f:
+            image_bytes = f.read()
+
+        from google.genai import types  # local import keeps top-level imports lean
+
+        async with self._validation_semaphore:
+            attempt = 0
+            while True:
+                try:
+                    response = await asyncio.to_thread(
+                        _gemini_client.models.generate_content,
+                        model=VALIDATION_MODEL,
+                        contents=[
+                            types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
+                            prompt,
+                        ],
+                    )
+
+                    raw = (response.text or "").strip().strip("`")
+                    if raw.lower().startswith("json"):
+                        raw = raw[4:].strip()
+
+                    logger.info(f"[Gemini validate] {frame_path} -> raw response: {raw[:200]}")
+
+                    parsed = json.loads(raw)
+                    return {
+                        "frame_path": frame_path,
+                        "is_match": bool(parsed.get("is_match", False)),
+                        "reasoning": parsed.get("reasoning", ""),
+                    }
+                except Exception as e:
+                    is_rate_limit = "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e)
+                    if is_rate_limit and attempt < max_retries:
+                        wait_s = 15 * (attempt + 1)  # 15s, then 30s
+                        logger.warning(
+                            f"[Gemini validate] Rate limited on {frame_path}, "
+                            f"retrying in {wait_s}s (attempt {attempt + 1}/{max_retries})..."
+                        )
+                        await asyncio.sleep(wait_s)
+                        attempt += 1
+                        continue
+                    logger.error(f"[Gemini validate] FAILED for {frame_path}: {type(e).__name__}: {e}")
+                    return {"frame_path": frame_path, "is_match": False, "reasoning": f"validation_error: {e}"}
+
 
 # --------------------------------------------------------------------------
 # API Endpoints
@@ -526,7 +658,6 @@ async def upload_video(file: UploadFile = File(...)):
     dest_filename = f"{uuid.uuid4().hex}{file_ext}"
     dest_path = UPLOAD_DIR / dest_filename
 
-    # Stream write in 1MB chunks to disk
     chunk_size = 1024 * 1024
     total_bytes = 0
     with open(dest_path, "wb") as buffer:
@@ -539,7 +670,6 @@ async def upload_video(file: UploadFile = File(...)):
 
     logger.info(f"Spooled upload: {file.filename} -> {dest_path} ({total_bytes / (1024*1024):.2f} MB)")
 
-    # Extract video duration via OpenCV
     duration = 0.0
     try:
         cap = cv2.VideoCapture(str(dest_path))
@@ -571,13 +701,14 @@ async def analyze_video(
     chunk_size: Optional[float] = Form(60.0)
 ):
     """
-    Analyzes video chunks with downsampled 1 fps keyframe extraction & motion filtering.
+    LEGACY endpoint — heuristic motion+keyword matching. Kept for reference
+    at /legacy/api/analyze; the real UI flow uses api.py's pipeline-backed
+    /api/analyze and /api/analyze/stream instead.
     """
     target_path = None
     if video_id:
         target_path = UPLOAD_DIR / video_id
     elif file:
-        # Save direct file upload if passed
         upload_res = await upload_video(file)
         target_path = Path(upload_res["path"])
         video_id = upload_res["video_id"]
@@ -597,7 +728,6 @@ async def analyze_video(
         chunk_matches = await auditor.analyze_chunk(chunk, sampled, query)
         all_matches.extend(chunk_matches)
 
-        # Build (timestamp, confidence) pairs for the temporal smoother
         for frame_info in sampled:
             ts = frame_info["timestamp_sec"]
             motion = frame_info.get("motion_score", 0.0)
@@ -607,8 +737,6 @@ async def analyze_video(
             mid_ts = (m.start_seconds + m.end_seconds) / 2.0
             frame_scores.append((mid_ts, m.confidence or 0.9))
 
-    # Apply temporal smoothing if available — bridges per-frame confidence dips
-    # caused by motion blur, poor lighting, or IR sensor noise in CCTV footage.
     smoothed_clips = []
     if _smoother is not None and frame_scores:
         frame_scores.sort(key=lambda x: x[0])
@@ -681,7 +809,8 @@ async def analyze_video_stream(
     chunk_size: Optional[float] = Query(60.0)
 ):
     """
-    SSE stream with 1 fps keyframe extraction progress and global timestamp mapping.
+    LEGACY SSE endpoint (heuristic path). Not used by api.py's real pipeline
+    endpoint of the same name — this one lives at /legacy/api/analyze/stream.
     """
     video_path = UPLOAD_DIR / video_id
     if not video_path.exists():
@@ -704,9 +833,9 @@ async def analyze_video_stream(
             for idx, chunk in enumerate(chunks):
                 current_seg = idx + 1
                 start_pct = 25 + int((idx / total_chunks) * 65)
-                
+
                 yield f"data: {json.dumps({'status': 'analyzing', 'progress': start_pct, 'message': f'Analyzing segment {current_seg} of {total_chunks} ({format_timestamp(chunk.start_second)} - {format_timestamp(chunk.end_second)})...', 'currentSegment': current_seg, 'totalSegments': total_chunks})}\n\n"
-                
+
                 sampled = chunk_proc.sample_and_compress_chunk_keyframes(str(video_path), chunk.start_second, chunk.end_second)
                 chunk_matches = await auditor.analyze_chunk(chunk, sampled, query)
                 all_matches.extend(chunk_matches)
