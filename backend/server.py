@@ -452,8 +452,6 @@ class VideoChunkProcessor:
 # Semantic Auditing Engine
 # --------------------------------------------------------------------------
 class SemanticVideoAuditor:
-    def __init__(self):
-        self.gemini_api_key = os.environ.get("GEMINI_API_KEY", "")
 
     # ------------------------------------------------------------------
     # LEGACY heuristic path (keyword + motion clustering). Kept for
@@ -555,22 +553,59 @@ class SemanticVideoAuditor:
     # ------------------------------------------------------------------
     # REAL pipeline path — Stage 3 of pipeline.py's CLIP+Gemini RAG flow.
     # ------------------------------------------------------------------
-    # Caps concurrent Gemini calls so we don't blow past free-tier RPM
-    # limits by firing every candidate frame at once.
-    _validation_semaphore = asyncio.Semaphore(2)
+
+    def __init__(self):
+        self.gemini_api_key = os.environ.get("GEMINI_API_KEY", "")
+        # Instance-level semaphore: caps concurrent Gemini HTTP calls to 2.
+        # This prevents the free-tier RPM burst limit from being hit when
+        # asyncio.gather fires all coroutines at once. At most 2 will ever
+        # be inside generate_content at the same time.
+        self._validation_semaphore = asyncio.Semaphore(2)
+
+    # Seconds to pause between each validated frame call.
+    # Free tier: 15 RPM = 1 req per 4s to stay safely below the limit.
+    # With semaphore(2) + 4s delay each, peak rate = 2/4s = 0.5 RPS = 30 RPM
+    # but since calls are sequential, real rate is ~1 request every 4s = 15 RPM.
+    _INTER_REQUEST_DELAY_S: float = 4.0
 
     async def validate_frames(self, frame_paths: List[str], original_query: str) -> List[Dict[str, Any]]:
         """
-        Sends each CLIP candidate frame + the officer's ORIGINAL raw query
-        to Gemini multimodal for a strict true/false spatial judgment.
-        Frames are validated with bounded concurrency (see semaphore above)
-        since firing all of them at once easily exceeds free-tier RPM.
+        Sends each CLIP candidate frame + the officer's original raw query to Gemini
+        multimodal for a strict true/false spatial judgment.
+
+        WHY SEQUENTIAL INSTEAD OF asyncio.gather:
+        asyncio.gather launches all N coroutines simultaneously. Even with a
+        semaphore(2), all 25 coroutines queue up immediately. When the first
+        wave gets a 429, it sleeps 15s inside the semaphore slot, blocking the
+        next 23 queued coroutines for the full retry duration — causing a
+        10-minute hang.
+
+        Sequential processing with a mandatory 4s inter-request delay is
+        far more reliable on the free tier:
+          - 25 frames × 4s = ~100s total worst case (no 429s at all)
+          - If a 429 does occur, only the single failing frame retries —
+            no backlog of 23 coroutines amplifying the wait.
         """
-        tasks = [self._validate_single_frame(p, original_query) for p in frame_paths]
-        return await asyncio.gather(*tasks)
+        results: List[Dict[str, Any]] = []
+        total = len(frame_paths)
+
+        for idx, frame_path in enumerate(frame_paths):
+            logger.info(
+                f"[Gemini validate] Processing frame {idx + 1}/{total}: "
+                f"{os.path.basename(frame_path)}"
+            )
+            result = await self._validate_single_frame(frame_path, original_query)
+            results.append(result)
+
+            # Hard delay between requests to stay under 15 RPM free-tier limit.
+            # Skip delay after the last frame (no next request to pace).
+            if idx < total - 1:
+                await asyncio.sleep(self._INTER_REQUEST_DELAY_S)
+
+        return results
 
     async def _validate_single_frame(
-        self, frame_path: str, original_query: str, max_retries: int = 2
+        self, frame_path: str, original_query: str, max_retries: int = 3
     ) -> Dict[str, Any]:
         prompt = (
             "You are an expert CCTV forensic investigator reviewing surveillance video frames. "
@@ -618,9 +653,6 @@ class SemanticVideoAuditor:
                     logger.info(f"[Gemini validate] {frame_path} -> raw response: {raw[:200]}")
 
                     parsed = json.loads(raw)
-                    # Gracefully handle the new 'confidence' field — older responses
-                    # may not include it, so we fall back to CLIP's confidence (1.0)
-                    # rather than crashing the validation pipeline.
                     gemini_confidence = parsed.get("confidence")
                     if not isinstance(gemini_confidence, (int, float)):
                         gemini_confidence = 1.0
@@ -635,16 +667,25 @@ class SemanticVideoAuditor:
                 except Exception as e:
                     is_rate_limit = "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e)
                     if is_rate_limit and attempt < max_retries:
-                        wait_s = 15 * (attempt + 1)  # 15s, then 30s
+                        # Exponential backoff: 10s, 20s, 40s
+                        wait_s = 10 * (2 ** attempt)
                         logger.warning(
-                            f"[Gemini validate] Rate limited on {frame_path}, "
+                            f"[Gemini validate] Rate limited on {os.path.basename(frame_path)}, "
                             f"retrying in {wait_s}s (attempt {attempt + 1}/{max_retries})..."
                         )
                         await asyncio.sleep(wait_s)
                         attempt += 1
                         continue
-                    logger.error(f"[Gemini validate] FAILED for {frame_path}: {type(e).__name__}: {e}")
-                    return {"frame_path": frame_path, "is_match": False, "confidence": 0.0, "reasoning": f"validation_error: {e}"}
+                    logger.error(
+                        f"[Gemini validate] FAILED for {os.path.basename(frame_path)}: "
+                        f"{type(e).__name__}: {e}"
+                    )
+                    return {
+                        "frame_path": frame_path,
+                        "is_match": False,
+                        "confidence": 0.0,
+                        "reasoning": f"validation_error: {e}",
+                    }
 
 
 # --------------------------------------------------------------------------
