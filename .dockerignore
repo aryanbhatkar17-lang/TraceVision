@@ -1,0 +1,43 @@
+# Git
+.git
+.gitignore
+
+# Python / Caching
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Environments
+.venv/
+venv/
+ENV/
+env/
+
+# Environment Variables & Secrets
+.env
+.env.*
+*.pem
+
+# IDE & Editor Configs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Docker / Build Artifacts
+Dockerfile
+.dockerignore
+
+# OS Junk
+.DS_Store
+Thumbs.db
+
+# Large Data & Local Media (Adjust based on your local setup)
+*.mp4
+*.mkv
+*.avi
+*.bin
+*.pt
+*.onnx
+*.weights

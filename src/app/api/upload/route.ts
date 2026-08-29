@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server'
 
 export const dynamic = 'force-dynamic'
-export const maxDuration = 300 // 5 minutes execution window for large multi-minute video uploads
+export const maxDuration = 60
 
-// Allowed video MIME types and extensions
+const BACKEND_URL = process.env.BACKEND_URL || 'http://127.0.0.1:8000'
+
 const ALLOWED_MIME_TYPES = new Set([
   'video/mp4',
   'video/webm',
@@ -16,26 +17,44 @@ const ALLOWED_MIME_TYPES = new Set([
 
 const ALLOWED_EXTENSIONS = new Set(['.mp4', '.webm', '.avi', '.mov', '.mkv', '.ogg'])
 
-const MAX_FILE_SIZE = 500 * 1024 * 1024 // 500MB
+// Vercel Serverless Function body limit is 4.5MB
+const MAX_FILE_SIZE = 4.5 * 1024 * 1024 
 
 function getFileExtension(filename: string): string {
   const lastDot = filename.lastIndexOf('.')
   return lastDot >= 0 ? filename.slice(lastDot).toLowerCase() : ''
 }
 
+async function fetchWithTimeout(url: string, options: RequestInit, timeoutMs = 45000) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    })
+    return response
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 export async function POST(req: NextRequest) {
   try {
     const formData = await req.formData()
-    const file = formData.get('file') as File | null
+    const rawFile = formData.get('file')
     
-    if (!file) {
-      return NextResponse.json({ error: 'No file uploaded' }, { status: 400 })
+    if (!rawFile || typeof rawFile === 'string') {
+      return NextResponse.json({ error: 'No video file provided' }, { status: 400 })
     }
 
-    // Validate file size
+    const file = rawFile as File
+
+    // Validate file size against Vercel payload limit
     if (file.size > MAX_FILE_SIZE) {
       return NextResponse.json(
-        { error: `File size exceeds ${MAX_FILE_SIZE / (1024 * 1024)}MB limit` },
+        { error: `File size exceeds Vercel proxy limit of 4.5MB. Upload directly to the backend.` },
         { status: 413 }
       )
     }
@@ -49,10 +68,8 @@ export async function POST(req: NextRequest) {
       )
     }
 
-    // Validate MIME type (if provided by browser)
+    // Validate MIME type
     if (file.type && !ALLOWED_MIME_TYPES.has(file.type)) {
-      // Some browsers don't send correct MIME types for video files
-      // Only reject if extension is also invalid
       if (!ALLOWED_EXTENSIONS.has(extension)) {
         return NextResponse.json(
           { error: 'Invalid video file type' },
@@ -61,21 +78,23 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // Forward to Python FastAPI backend if available with 300s timeout
+    // Forward upload to Python backend dynamically
     try {
-      const pyRes = await fetch('http://127.0.0.1:8000/api/upload', {
+      const pyRes = await fetchWithTimeout(`${BACKEND_URL}/api/upload`, {
         method: 'POST',
         body: formData,
-        signal: AbortSignal.timeout(300000), // 300 seconds (5 minutes)
-      })
+      }, 45000)
+
       if (pyRes.ok) {
         const data = await pyRes.json()
         return NextResponse.json(data)
       }
-    } catch {
-      // Backend offline fallback
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Backend connection failed'
+      console.warn(`[Upload Proxy] Backend failed, utilizing fallback: ${msg}`)
     }
 
+    // Fallback response for offline local backend
     return NextResponse.json({
       video_id: `vid-${Date.now()}-${file.name.replace(/[^a-zA-Z0-9._-]/g, '_')}`,
       original_filename: file.name,

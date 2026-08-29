@@ -1,12 +1,23 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { AuditMatch, AuditResponse } from '@/types/audit'
 
-// Next.js Route Segment Config
 export const dynamic = 'force-dynamic'
-export const maxDuration = 300
+export const maxDuration = 60
 
-// Python backend URL — all heavy processing (OpenCV, FFmpeg, CLIP, Smoothing) runs here
 const BACKEND_URL = process.env.BACKEND_URL || 'http://127.0.0.1:8000'
+
+// Interface for backend raw match objects
+interface RawBackendMatch {
+  id?: string
+  start_time?: string
+  end_time?: string
+  start_seconds?: number | string
+  end_seconds?: number | string
+  category?: string
+  description?: string
+  confidence?: number
+  chunk_id?: string | number
+}
 
 function formatSeconds(sec: number): string {
   const hrs = Math.floor(sec / 3600)
@@ -18,33 +29,53 @@ function formatSeconds(sec: number): string {
   return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`
 }
 
+async function fetchWithTimeout(url: string, options: RequestInit, timeoutMs = 45000) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    })
+    return response
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 export async function POST(req: NextRequest) {
   try {
-    // -----------------------------------------------------------------------
-    // Step 1: Parse incoming form data from the dashboard
-    // -----------------------------------------------------------------------
+    if (!process.env.BACKEND_URL && process.env.NODE_ENV === 'production') {
+      return NextResponse.json(
+        { error: 'BACKEND_URL environment variable is not configured on Vercel.' },
+        { status: 500 }
+      )
+    }
+
     const formData = await req.formData()
-    const videoFile = (formData.get('video') || formData.get('file')) as File | null
+    const rawFile = formData.get('video') || formData.get('file')
     const query = (formData.get('query') as string) || ''
     const duration = parseFloat((formData.get('duration') as string) || '0')
 
-    if (!videoFile || typeof videoFile === 'string') {
+    if (!rawFile || typeof rawFile === 'string') {
       return NextResponse.json(
         { error: 'No video file provided for analysis.' },
         { status: 400 }
       )
     }
 
-    // -----------------------------------------------------------------------
-    // Step 2: Upload the video to the Python backend
-    // -----------------------------------------------------------------------
+    const videoFile = rawFile as File
+
+    // Step 1: Upload video to Render
     const uploadForm = new FormData()
     uploadForm.append('file', videoFile, videoFile.name)
 
-    const uploadRes = await fetch(`${BACKEND_URL}/api/upload`, {
+    const uploadRes = await fetchWithTimeout(`${BACKEND_URL}/api/upload`, {
       method: 'POST',
       body: uploadForm,
-      signal: AbortSignal.timeout(120_000), // 2 min upload timeout
+    }).catch((err) => {
+      throw new Error(`Failed to connect to Render backend at ${BACKEND_URL}. Server might be sleeping or down. (${err.message})`)
     })
 
     if (!uploadRes.ok) {
@@ -56,19 +87,17 @@ export async function POST(req: NextRequest) {
     const videoId: string = uploadData.video_id
     const videoDuration: number = uploadData.duration_seconds || duration
 
-    // -----------------------------------------------------------------------
-    // Step 3: Run analysis on the backend (handles OpenCV keyframes,
-    //         motion filtering, CLIP/Semantic auditing, and Temporal Smoothing)
-    // -----------------------------------------------------------------------
+    // Step 2: Trigger Analysis
     const analyzeForm = new FormData()
     analyzeForm.append('video_id', videoId)
     analyzeForm.append('query', query)
     analyzeForm.append('duration', String(videoDuration))
 
-    const analyzeRes = await fetch(`${BACKEND_URL}/api/analyze`, {
+    const analyzeRes = await fetchWithTimeout(`${BACKEND_URL}/api/analyze`, {
       method: 'POST',
       body: analyzeForm,
-      signal: AbortSignal.timeout(240_000), // 4 min analysis timeout
+    }).catch((err) => {
+      throw new Error(`Analysis request to backend timed out or failed. (${err.message})`)
     })
 
     if (!analyzeRes.ok) {
@@ -78,21 +107,24 @@ export async function POST(req: NextRequest) {
 
     const analysisData = await analyzeRes.json()
 
-    // -----------------------------------------------------------------------
-    // Step 4: Map backend response to the AuditResponse schema
-    // -----------------------------------------------------------------------
+    // Step 3: Map backend response with typed interface
     const rawMatches: AuditMatch[] = (analysisData.matches || []).map(
-      (m: any, index: number): AuditMatch => ({
-        id: m.id || `match-${index + 1}`,
-        start_time: m.start_time || formatSeconds(m.start_seconds),
-        end_time: m.end_time || formatSeconds(m.end_seconds),
-        start_seconds: Number(m.start_seconds) || 0,
-        end_seconds: Number(m.end_seconds) || 0,
-        category: m.category || 'PERSON',
-        description: m.description,
-        confidence: Number(m.confidence?.toFixed?.(2)) || 0.9,
-        chunk_id: m.chunk_id,
-      })
+      (m: RawBackendMatch, index: number): AuditMatch => {
+        const startSec = Number(m.start_seconds) || 0
+        const endSec = Number(m.end_seconds) || 0
+
+        return {
+          id: m.id || `match-${index + 1}`,
+          start_time: m.start_time || formatSeconds(startSec),
+          end_time: m.end_time || formatSeconds(endSec),
+          start_seconds: startSec,
+          end_seconds: endSec,
+          category: m.category || 'PERSON',
+          description: m.description || '',
+          confidence: typeof m.confidence === 'number' ? Number(m.confidence.toFixed(2)) : 0.9,
+          chunk_id: m.chunk_id !== undefined ? String(m.chunk_id) : undefined,
+        }
+      }
     )
 
     const response: AuditResponse = {
