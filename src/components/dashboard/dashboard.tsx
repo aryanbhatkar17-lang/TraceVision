@@ -7,8 +7,6 @@ import { QueryBar } from './query-bar'
 import { VideoPlayer } from './video-player'
 import { AuditResults } from './audit-results'
 import { AuditMatch, TimelineMarker, AnalysisProgress, AuditResponse } from '@/types/audit'
-import { preloadFFmpeg } from '@/lib/ffmpeg-preload'
-import { compressVideo } from '@/lib/compress'
 import { ShieldCheck, RotateCcw } from 'lucide-react'
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
@@ -17,7 +15,6 @@ export default function Dashboard() {
   const [videoFile, setVideoFile] = useState<File | null>(null)
   const [videoUrl, setVideoUrl] = useState<string | null>(null)
   const [videoDuration, setVideoDuration] = useState<number>(0)
-  const [videoMeta, setVideoMeta] = useState<{ width: number; height: number; fps: number } | null>(null)
   const [currentTime, setCurrentTime] = useState<number>(0)
   const [isPlaying, setIsPlaying] = useState<boolean>(false)
 
@@ -28,10 +25,6 @@ export default function Dashboard() {
   const [progress, setProgress] = useState<AnalysisProgress | null>(null)
   const abortControllerRef = useRef<AbortController | null>(null)
 
-  // Preload FFmpeg.wasm in the background when dashboard mounts
-  useEffect(() => {
-    preloadFFmpeg()
-  }, [])
 
   // Clear any residual session / local state on initial mount
   useEffect(() => {
@@ -54,12 +47,6 @@ export default function Dashboard() {
   }, [videoUrl])
 
   const handleFileUpload = useCallback((file: File) => {
-    const MAX_SIZE_BYTES = 500 * 1024 * 1024
-    if (file.size > MAX_SIZE_BYTES) {
-      alert(`File size exceeds the 500MB limit (${(file.size / (1024 * 1024)).toFixed(1)}MB). Please choose a compressed file.`)
-      return
-    }
-
     if (videoUrl && videoUrl.startsWith('blob:')) {
       URL.revokeObjectURL(videoUrl)
     }
@@ -72,7 +59,6 @@ export default function Dashboard() {
     setMarkers([])
     setActiveMatchId(null)
     setProgress(null)
-    setVideoMeta(null) // Reset metadata on new file
   }, [videoUrl])
 
   const handleReset = useCallback(() => {
@@ -129,7 +115,7 @@ export default function Dashboard() {
       return
     }
 
-    // Reset markers immediately when a new query starts, even on the same video
+    // Reset markers immediately when a new query starts
     setMatches([])
     setMarkers([])
     setActiveMatchId(null)
@@ -144,7 +130,7 @@ export default function Dashboard() {
     try {
       const dur = videoDuration || 120
 
-      // Ensure a valid binary File exists
+      // Resolve a File object from videoFile or videoUrl
       let fileToSend = videoFile
       if (!fileToSend && videoUrl) {
         const blobRes = await fetch(videoUrl)
@@ -156,54 +142,14 @@ export default function Dashboard() {
         throw new Error('No valid video file could be prepared for analysis.')
       }
 
-      // Step 0: Client-side compression (non-blocking Web Worker)
-      let uploadFile = fileToSend
-      if (videoMeta) {
-        try {
-          setProgress({
-            status: 'compressing',
-            progress: 0,
-            message: 'Optimizing video for upload...',
-          })
-
-          const compressed = await compressVideo({
-            file: fileToSend,
-            duration: dur,
-            width: videoMeta.width,
-            height: videoMeta.height,
-            fps: videoMeta.fps,
-            onProgress: (pct) => {
-              if (!abortController.signal.aborted) {
-                setProgress({
-                  status: 'compressing',
-                  progress: pct,
-                  message: `Compressing video... ${pct}%`,
-                })
-              }
-            },
-          })
-
-          if (!abortController.signal.aborted) {
-            uploadFile = new File([compressed.blob], compressed.filename, {
-              type: 'video/mp4',
-            })
-            console.log(
-              `[Sentinel] Compressed: ${compressed.reduction}% reduction ` +
-              `(${(compressed.originalSize / 1e6).toFixed(1)}MB → ${(compressed.compressedSize / 1e6).toFixed(1)}MB)`,
-            )
-          }
-        } catch (compressErr) {
-          console.warn('[Sentinel] Compression failed, uploading original:', compressErr)
-          // Fall back to original file
-        }
-      }
-
-      // Step 1: Upload progress
+      // Stream the raw file directly — no client-side compression.
+      // The backend runs FFmpeg with CUDA NVDEC hardware acceleration
+      // to extract high-fidelity 1024px frames at the server level.
       if (!abortController.signal.aborted) {
         setProgress({
           status: 'uploading',
-          progress: 20,
-          message: `Uploading footage (${(uploadFile.size / (1024 * 1024)).toFixed(1)} MB)...`,
+          progress: 15,
+          message: `Uploading footage (${(fileToSend.size / (1024 * 1024)).toFixed(1)} MB)...`,
         })
       }
 
@@ -211,29 +157,28 @@ export default function Dashboard() {
         if (!abortController.signal.aborted) {
           setProgress({
             status: 'extracting',
-            progress: 50,
-            message: 'Extracting video frames via FFmpeg...',
+            progress: 45,
+            message: 'Server extracting frames with GPU acceleration...',
           })
         }
-      }, 600)
+      }, 800)
 
       extractTimer = setTimeout(() => {
         if (!abortController.signal.aborted) {
           setProgress({
             status: 'analyzing',
             progress: 75,
-            message: 'Multimodal AI analyzing visual patterns...',
+            message: 'Multimodal AI analyzing spatial patterns...',
           })
         }
-      }, 1500)
+      }, 2500)
 
-      // Build payload containing expected keys
       const formData = new FormData()
-      formData.append('video', uploadFile)
-      formData.append('file', uploadFile) // Fallback alias
+      formData.append('video', fileToSend)
+      formData.append('file', fileToSend)
       formData.append('query', query)
       formData.append('duration', dur.toString())
-      formData.append('fileName', uploadFile.name)
+      formData.append('fileName', fileToSend.name)
 
       const response = await fetch(`${API_BASE}/api/analyze`, {
         method: 'POST',
@@ -360,9 +305,8 @@ export default function Dashboard() {
               onSelectMarker={handleSelectMarker}
               onFileUpload={handleFileUpload}
               onTimeUpdate={(t) => setCurrentTime(t)}
-              onLoadedMetadata={(d, meta) => {
+              onLoadedMetadata={(d) => {
                 setVideoDuration(d)
-                if (meta) setVideoMeta(meta)
               }}
             />
           </div>

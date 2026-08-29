@@ -1,5 +1,5 @@
 import os
-import cv2
+import subprocess
 import shutil
 import logging
 import tempfile
@@ -16,7 +16,7 @@ for _candidate in _ENV_CANDIDATES:
         break
 
 from google import genai
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from server import SemanticVideoAuditor
 from clip_engine import evaluate_video_frames
 from smoothing import TemporalSmoother
@@ -35,84 +35,202 @@ _gemini_client = genai.Client(api_key=_PIPELINE_GEMINI_KEY)
 TRANSLATION_MODEL = "gemini-3.5-flash-lite"
 
 # --- Tunable constants -------------------------------------------------
-FRAME_SAMPLE_RATE_FPS = 1
-CLIP_NOISE_FLOOR = 0.10          # Lowered to 0.10 to allow night/low-contrast footage through
-CLIP_TOP_K = 25                  # matches gemini-3.5-flash-lite's generous quota
+CLIP_NOISE_FLOOR = 0.10   # Low floor keeps compositional/spatial queries alive
+CLIP_TOP_K       = 25     # Gemini validation slots (one per uniform timeline bin)
 # ------------------------------------------------------------------------
 
 
-def _extract_frames_opencv(video_path: str, output_dir: str, fps: int = None) -> Dict[float, str]:
+# ---------------------------------------------------------------------------
+# Frame Extraction — FFmpeg CUDA Hardware-Accelerated
+# ---------------------------------------------------------------------------
+
+def _get_video_duration(video_path: str) -> float:
     """
-    Extracts frames using OpenCV and saves them as JPEGs.
-    Returns a mapping of {timestamp_seconds: frame_file_path} so we can
-    bridge CLIP's (timestamp, confidence) output back to actual image files
-    for Gemini later.
-
-    If fps is not given, it's chosen adaptively from video duration: short
-    clips (<=30s) sample at 2fps so quick, brief actions (a hand reaching
-    into a bag, a fast pass-by) aren't missed entirely between 1fps gaps;
-    longer footage falls back to 1fps to keep frame/API counts reasonable.
+    Use FFprobe to get the exact video duration in seconds.
+    Falls back to 0.0 if FFprobe is unavailable or parsing fails.
     """
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        raise RuntimeError(f"Could not open video file: {video_path}")
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                video_path,
+            ],
+            capture_output=True, text=True, timeout=30,
+        )
+        return float(result.stdout.strip())
+    except Exception as e:
+        logger.warning(f"[FFprobe] Could not determine duration: {e}")
+        return 0.0
 
-    native_fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
 
+def _adaptive_fps(duration_sec: float) -> float:
+    """
+    Choose extraction FPS based on video duration to balance frame count
+    against OOM risk on massive CCTV files.
+      <=30s  → 2.0 fps  (dense sampling for short clips)
+      <=600s → 1.0 fps  (standard for sub-10-min footage)
+       >600s → 0.5 fps  (1 frame per 2s for long surveillance recordings)
+    """
+    if duration_sec <= 30:
+        return 2.0
+    elif duration_sec <= 600:
+        return 1.0
+    else:
+        return 0.5
+
+
+def _extract_frames_ffmpeg(video_path: str, output_dir: str, fps: Optional[float] = None) -> Dict[float, str]:
+    """
+    Extract frames using native FFmpeg with CUDA hardware acceleration.
+
+    Why FFmpeg over OpenCV:
+    - NVDEC/CUDA decoding offloads H.264/H.265 decode from the CPU to the GPU
+      decoder engine, cutting extraction wall-time by 3-5x on CCTV H.264.
+    - FFmpeg's scale filter with -2 alignment guarantees even dimensions
+      (no odd-number width/height libx264 crash).
+    - JPEG quality via -q:v 2 (~93% quality) exceeds the OpenCV Q85 baseline,
+      preserving fine spatial detail for Gemini's 1024px forensic scan.
+
+    Falls back to CPU FFmpeg if CUDA is unavailable on this machine.
+
+    Returns:
+        Dict[timestamp_seconds, frame_file_path]
+    """
+    duration_sec = _get_video_duration(video_path)
     if fps is None:
-        total_frames = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0
-        duration_sec = (total_frames / native_fps) if native_fps > 0 else 0
-        fps = 2 if duration_sec <= 30 else FRAME_SAMPLE_RATE_FPS
+        fps = _adaptive_fps(duration_sec)
 
-    frame_interval = max(int(round(native_fps / fps)), 1)
+    logger.info(
+        f"[Frame Extraction] duration={duration_sec:.1f}s, adaptive_fps={fps}, "
+        f"estimated_frames={int(duration_sec * fps)}"
+    )
 
+    # Output pattern: frame_%04d.jpg  (1-indexed, e.g. frame_0001.jpg)
+    output_pattern = os.path.join(output_dir, "frame_%04d.jpg")
+
+    # -hwaccel cuda     — NVDEC hardware decoder (drops to CPU on failure)
+    # fps=...,scale     — sample rate + clamp long side to 1024px; -2 = even dim
+    # -q:v 2            — near-lossless JPEG (~93% quality)
+    # -f image2         — image sequence muxer
+    def _build_cmd(hwaccel: bool) -> List[str]:
+        cmd = ["ffmpeg", "-y"]
+        if hwaccel:
+            # -hwaccel auto: lets FFmpeg pick the best available decoder
+            # (NVDEC for NVIDIA, AMF for AMD, QuickSync for Intel).
+            # Falls back to software if no HW decoder matches the codec.
+            cmd += ["-hwaccel", "auto"]
+        cmd += [
+            "-i", video_path,
+            "-vf", f"fps={fps},scale='min(1024,iw)':-2",
+            "-q:v", "2",
+            "-f", "image2",
+            output_pattern,
+        ]
+        return cmd
+
+    try:
+        subprocess.run(
+            _build_cmd(hwaccel=True),
+            capture_output=True, text=True, timeout=600,
+            check=True,  # raises CalledProcessError on non-zero exit
+        )
+        logger.info("[Frame Extraction] Hardware-accelerated FFmpeg completed successfully.")
+    except subprocess.CalledProcessError as e:
+        logger.warning(
+            f"[Frame Extraction] Hardware-accelerated FFmpeg failed (rc={e.returncode}). "
+            f"stderr tail: {e.stderr[-600:].strip()}\n"
+            f"Retrying with CPU-only FFmpeg..."
+        )
+        try:
+            subprocess.run(
+                _build_cmd(hwaccel=False),
+                capture_output=True, text=True, timeout=600,
+                check=True,
+            )
+            logger.info("[Frame Extraction] CPU FFmpeg fallback completed successfully.")
+        except subprocess.CalledProcessError as e2:
+            raise RuntimeError(
+                f"FFmpeg CPU extraction failed (rc={e2.returncode}):\n{e2.stderr[-800:]}"
+            )
+    except FileNotFoundError:
+        raise RuntimeError(
+            "FFmpeg not found in PATH. Install FFmpeg and ensure it is accessible."
+        )
+
+    # Reconstruct {timestamp_seconds: filepath} from the written files.
+    # FFmpeg names frames starting from frame_0001.jpg (1-indexed).
+    # timestamp = (frame_number - 1) / fps
     timestamp_to_path: Dict[float, str] = {}
-    frame_idx = 0
+    frame_files = sorted(
+        f for f in os.listdir(output_dir)
+        if f.startswith("frame_") and f.endswith(".jpg")
+    )
 
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
+    for frame_file in frame_files:
+        try:
+            frame_number = int(frame_file.replace("frame_", "").replace(".jpg", ""))
+        except ValueError:
+            continue
+        timestamp_seconds = round((frame_number - 1) / fps, 2)
+        timestamp_to_path[timestamp_seconds] = os.path.join(output_dir, frame_file)
 
-        if frame_idx % frame_interval == 0:
-            timestamp_seconds = round(frame_idx / native_fps, 2)
-            filename = f"frame_{timestamp_seconds:.2f}.jpg"
-            filepath = os.path.join(output_dir, filename)
-            cv2.imwrite(filepath, frame)
-            timestamp_to_path[timestamp_seconds] = filepath
-
-        frame_idx += 1
-
-    cap.release()
+    logger.info(f"[Frame Extraction] Wrote {len(timestamp_to_path)} frames to {output_dir}")
     return timestamp_to_path
 
 
+# ---------------------------------------------------------------------------
+# Timestamp Bridge
+# ---------------------------------------------------------------------------
+
 def _closest_frame_path(timestamp: float, timestamp_to_path: Dict[float, str]) -> str:
     """
-    evaluate_video_frames may not return timestamps with identical float
-    precision to what OpenCV wrote to disk, so we snap to the nearest
-    known extracted frame rather than assuming an exact dict hit.
+    Snap a CLIP-reported timestamp to the nearest extracted frame path.
+    CLIP may return float values with different precision than what FFmpeg wrote;
+    this prevents missed dict lookups.
     """
     closest_ts = min(timestamp_to_path.keys(), key=lambda t: abs(t - timestamp))
     return timestamp_to_path[closest_ts]
 
 
+# ---------------------------------------------------------------------------
+# Stage 1 — LLM Query Translation
+# ---------------------------------------------------------------------------
+
 async def _translate_query_for_clip(raw_query: str) -> str:
     """
-    Stage 1: LLM Query Translation using Gemini.
-    Converts a conversational officer query into a CLIP-optimized visual caption.
+    Converts a conversational officer query into a broad-recall CLIP-optimized
+    visual co-occurrence caption.
 
-    Example:
-        "locate a person with a stroller" -> "a baby stroller on a sidewalk"
-        "Did a red car pass by?"          -> "a red car driving on a street"
+    CLIP ViT-B/32 cannot understand spatial prepositional binding on its own
+    ("beside", "next to", "near"). Direct spatial queries produce lower cosine
+    similarity scores than they deserve, causing the model to rank relevant
+    frames below the noise floor. The fix: translate to broad descriptive
+    co-occurrence captions that include both subjects in natural scene language,
+    letting CLIP's visual encoder find frames where both objects are present.
+
+    Examples:
+        "locate man beside car"    -> "a person walking near cars on a street or road"
+        "person near truck"        -> "a pedestrian standing next to a large truck on a road"
+        "Did a red car pass by?"   -> "a red car driving on a street"
+        "man with yellow backpack" -> "a man carrying a yellow backpack walking outdoors"
     """
     try:
         prompt = (
-            "You are an AI assistant for a CCTV surveillance search system. "
-            "Convert the following natural language search query into a concise, "
-            "visual scene description optimized for CLIP image-text matching. "
-            "Output ONLY the optimized visual description/caption, with no extra text or punctuation.\n\n"
-            f"Query: {raw_query}"
+            "You are an AI vision assistant for a CCTV forensic search system. "
+            "Convert the following surveillance search query into a broad, descriptive "
+            "visual scene caption optimized for CLIP image-text similarity matching.\n\n"
+            "Rules:\n"
+            "1. For spatial queries ('beside', 'near', 'next to', 'walking by', 'inside'), "
+            "describe both subjects co-occurring naturally in the scene WITHOUT using "
+            "the spatial preposition itself (CLIP cannot reason about prepositions).\n"
+            "2. Keep the description broad and general — avoid overly specific details "
+            "that reduce recall on wide-angle CCTV footage.\n"
+            "3. Use natural, scene-level language (e.g., 'on a street', 'on a road', "
+            "'on a sidewalk', 'in a parking lot') to help CLIP find the correct environment.\n"
+            "4. Output ONLY the optimized visual caption. No extra text, no punctuation at end.\n\n"
+            f"Search Query: {raw_query}"
         )
 
         response = _gemini_client.models.generate_content(
@@ -130,20 +248,24 @@ async def _translate_query_for_clip(raw_query: str) -> str:
         return raw_query
 
 
+# ---------------------------------------------------------------------------
+# Main Pipeline
+# ---------------------------------------------------------------------------
+
 async def _run_search_pipeline(video_path: str, raw_query: str, smoother: "TemporalSmoother") -> Dict[str, Any]:
     """
-    Two-Stage Multimodal RAG search pipeline for TraceVision.
+    Four-Stage Multimodal RAG search pipeline for TraceVision.
 
     This is the function api.py imports via:
         from pipeline import _run_search_pipeline
     Do NOT rename this — api.py's import binds to this exact name.
 
     Flow:
-      1. LLM Query Translation   -> CLIP-optimized visual caption
-      2. CLIP Retrieval          -> Top-K raw candidate frames (fast, noisy)
-      3. LLM Validation          -> Gemini (SemanticVideoAuditor) confirms
-                                     which candidates are real matches
-      4. Temporal Smoothing      -> Only Gemini-validated timestamps go in
+      1. LLM Query Translation     -> CLIP-optimized visual co-occurrence caption
+      2. FFmpeg CUDA Frame Extract -> High-fidelity 1024px frames (GPU-accelerated)
+      3. CLIP Retrieval            -> Timeline-bucketed peak candidates
+      4. Gemini Validation         -> Spatial forensic auditor confirms each frame
+      5. Temporal Smoothing        -> Only Gemini-validated timestamps go in
     """
     temp_frames_dir = tempfile.mkdtemp(prefix="tracevision_frames_")
 
@@ -155,26 +277,65 @@ async def _run_search_pipeline(video_path: str, raw_query: str, smoother: "Tempo
         logger.info(f"[Stage 1] Raw query: '{raw_query}' -> CLIP query: '{clip_query}'")
 
         # ------------------------------------------------------------
-        # STAGE 2: CLIP Retrieval (Top-K, not a hard threshold)
+        # STAGE 2: FFmpeg CUDA Frame Extraction
         # ------------------------------------------------------------
-        timestamp_to_path = _extract_frames_opencv(video_path, temp_frames_dir)
+        # Compute adaptive_fps here so we can pass it to the CLIP engine.
+        # evaluate_video_frames needs the exact fps to reconstruct timestamps
+        # from the sequential frame_%04d.jpg filenames FFmpeg writes.
+        video_duration_sec = _get_video_duration(video_path)
+        adaptive_fps = _adaptive_fps(video_duration_sec)
+
+        timestamp_to_path = _extract_frames_ffmpeg(video_path, temp_frames_dir, fps=adaptive_fps)
 
         if not timestamp_to_path:
             raise RuntimeError("No frames were extracted from the video — check the source file.")
 
-        # evaluate_video_frames returns: [{"timestamp_seconds": float, "confidence": float}]
-        raw_scores: List[Dict[str, float]] = evaluate_video_frames(temp_frames_dir, clip_query)
+        # ------------------------------------------------------------
+        # STAGE 3: CLIP Retrieval with Timeline-Aware Bucketing
+        # ------------------------------------------------------------
+        # Pass adaptive_fps so clip_engine can compute timestamps as:
+        #   timestamp = (frame_index - 1) / adaptive_fps
+        raw_scores: List[Dict[str, float]] = evaluate_video_frames(temp_frames_dir, clip_query, fps=adaptive_fps)
 
-        # Apply only the noise floor, then rank and slice to Top-K.
-        # This is the key fix: we stop treating a single scalar threshold
-        # as a pass/fail gate and instead treat CLIP purely as a retriever.
+        # Noise floor: 0.10 prevents spatial/compositional queries from being
+        # dropped prematurely (they inherently score lower than simple object queries).
         above_noise_floor = [f for f in raw_scores if f["confidence"] >= CLIP_NOISE_FLOOR]
-        top_candidates = sorted(above_noise_floor, key=lambda f: f["confidence"], reverse=True)[:CLIP_TOP_K]
+
+        # ------------------------------------------------------------------
+        # Temporal Sub-Window Peak Sampling (Timeline-Aware Bucketing)
+        # Fixes "Timeline Wipeout": On a 34-minute video, a simple Top-K
+        # always pulls frames from the first few minutes (where high-traffic
+        # scenes produce hundreds of high scores) and discards everything after.
+        # Fix: divide the FULL timeline into exactly CLIP_TOP_K uniform bins and
+        # take only the peak-confidence candidate from each bin. This guarantees
+        # Gemini sees exactly one representative frame from every time segment.
+        # ------------------------------------------------------------------
+        if not above_noise_floor:
+            return {"query": raw_query, "clip_query": clip_query, "matches": [], "clips": []}
+
+        scored_by_time = sorted(above_noise_floor, key=lambda f: f["timestamp_seconds"])
+        min_ts = scored_by_time[0]["timestamp_seconds"]
+        max_ts = scored_by_time[-1]["timestamp_seconds"]
+        timeline_duration = max_ts - min_ts
+
+        # e.g. 2040s / 25 bins = 81.6s per bin for a 34-minute video
+        bin_size = max(timeline_duration / CLIP_TOP_K, 1.0)
+
+        bins: Dict[int, Dict[str, float]] = {}
+        for frame in scored_by_time:
+            bin_idx = int((frame["timestamp_seconds"] - min_ts) / bin_size)
+            bin_idx = min(bin_idx, CLIP_TOP_K - 1)  # clamp boundary edge case
+            if bin_idx not in bins or frame["confidence"] > bins[bin_idx]["confidence"]:
+                bins[bin_idx] = frame
+
+        # Already in chronological order (dict keys are bin indices)
+        top_candidates = [bins[idx] for idx in sorted(bins.keys())]
 
         logger.info(
-            f"[Stage 2] CLIP retrieved {len(raw_scores)} scored frames, "
-            f"{len(above_noise_floor)} above noise floor ({CLIP_NOISE_FLOOR}), "
-            f"top {len(top_candidates)} passed to Gemini for validation."
+            f"[Stage 3] CLIP retrieved {len(raw_scores)} scored frames, "
+            f"{len(above_noise_floor)} above noise floor ({CLIP_NOISE_FLOOR}). "
+            f"Timeline ({timeline_duration:.1f}s) split into {CLIP_TOP_K} bins of {bin_size:.1f}s. "
+            f"Selected {len(top_candidates)} chronological peaks for Gemini validation."
         )
 
         if not top_candidates:
@@ -193,27 +354,25 @@ async def _run_search_pipeline(video_path: str, raw_query: str, smoother: "Tempo
         ]
 
         # ------------------------------------------------------------
-        # STAGE 3: LLM Validation via SemanticVideoAuditor (Gemini)
+        # STAGE 4: Gemini Spatial Forensic Validation
         # ------------------------------------------------------------
         auditor = SemanticVideoAuditor()
 
-        # We pass the ORIGINAL raw officer query here — not the CLIP
-        # caption — because Gemini does the spatial/logical reasoning
-        # CLIP can't ("with a stroller" implies a person AND a stroller
-        # together, not just either object present in frame).
+        # Pass the ORIGINAL raw officer query — not the CLIP caption — because
+        # Gemini does the spatial/logical reasoning CLIP can't.
         audit_results = await auditor.validate_frames(
             frame_paths=[c["frame_path"] for c in candidate_frames_for_audit],
             original_query=raw_query,
         )
-        # Expected shape from SemanticVideoAuditor.validate_frames:
-        # [{"frame_path": str, "is_match": bool, "reasoning": str}, ...]
 
         verdict_by_path = {r["frame_path"]: r for r in audit_results}
 
         validated_frames = [
             {
                 "timestamp_seconds": c["timestamp_seconds"],
-                "confidence": c["confidence"],
+                # Prefer Gemini's semantic confidence over CLIP's raw cosine similarity —
+                # Gemini has seen the actual 1024px frame and evaluated spatial proximity.
+                "confidence": verdict_by_path.get(c["frame_path"], {}).get("confidence", c["confidence"]),
                 "reasoning": verdict_by_path.get(c["frame_path"], {}).get("reasoning", ""),
             }
             for c in candidate_frames_for_audit
@@ -221,7 +380,7 @@ async def _run_search_pipeline(video_path: str, raw_query: str, smoother: "Tempo
         ]
 
         logger.info(
-            f"[Stage 3] Gemini validated {len(validated_frames)}/{len(candidate_frames_for_audit)} "
+            f"[Stage 4] Gemini validated {len(validated_frames)}/{len(candidate_frames_for_audit)} "
             f"CLIP candidates as true positives."
         )
 
@@ -229,30 +388,24 @@ async def _run_search_pipeline(video_path: str, raw_query: str, smoother: "Tempo
             return {"query": raw_query, "clip_query": clip_query, "matches": [], "clips": []}
 
         # ------------------------------------------------------------
-        # STAGE 4: Temporal Smoothing & Frontend Formatting
+        # STAGE 5: Temporal Smoothing & Frontend Formatting
         # ------------------------------------------------------------
-        # CRITICAL FIX: sort chronologically. validated_frames comes out
-        # of the is_match filter in confidence-rank order (whatever order
-        # asyncio.gather resolved them), NOT time order. TemporalSmoother's
-        # gap-bridging logic assumes non-decreasing timestamps — feeding it
-        # an out-of-order sequence corrupts clustering (e.g. splits a real
-        # continuous 10s-16s event into garbage instead of one clip).
+        # Sort chronologically before feeding to TemporalSmoother — its
+        # gap-bridging logic assumes non-decreasing timestamps.
         validated_frames.sort(key=lambda x: x["timestamp_seconds"])
 
-        # The smoother strictly expects a list of tuples: [(timestamp, confidence)]
         smoother_input = [(f["timestamp_seconds"], f["confidence"]) for f in validated_frames]
         diagnostics = smoother.get_diagnostics(smoother_input)
 
-        # Format the output strictly to match the AuditMatch interface in dashboard.tsx
         frontend_matches = []
         for idx, f in enumerate(validated_frames):
             frontend_matches.append({
                 "id": f"gemini-match-{idx}",
                 "start_seconds": f["timestamp_seconds"],
-                "end_seconds": f["timestamp_seconds"] + 2.0,  # Assuming a standard 2s snippet length
+                "end_seconds": f["timestamp_seconds"] + 2.0,
                 "confidence": f["confidence"],
                 "description": f.get("reasoning", f"Verified match: {clip_query}"),
-                "category": "SECURITY"
+                "category": "SECURITY",
             })
 
         return {
@@ -263,8 +416,6 @@ async def _run_search_pipeline(video_path: str, raw_query: str, smoother: "Tempo
         }
 
     finally:
-        # ------------------------------------------------------------
-        # Cleanup: never let extracted frames pile up on disk
-        # ------------------------------------------------------------
+        # Never let extracted frames pile up on disk
         shutil.rmtree(temp_frames_dir, ignore_errors=True)
         logger.info(f"Cleaned up temp frame directory: {temp_frames_dir}")

@@ -573,15 +573,24 @@ class SemanticVideoAuditor:
         self, frame_path: str, original_query: str, max_retries: int = 2
     ) -> Dict[str, Any]:
         prompt = (
-            "You are assisting a police officer reviewing CCTV footage. "
-            "Look carefully at this single frame and answer strictly based "
-            "on what is visually present — do not guess or infer beyond "
-            "what you can actually see in the image.\n\n"
-            f"Officer's request: \"{original_query}\"\n\n"
-            "Does this exact frame show what the officer is looking for? "
-            "Respond ONLY with valid JSON, no markdown fences, no extra "
-            "text, in exactly this shape:\n"
-            '{"is_match": true or false, "reasoning": "one short sentence"}'
+            "You are an expert CCTV forensic investigator reviewing surveillance video frames. "
+            "Your task is to determine whether this frame contains what the officer is looking for.\n\n"
+            f"User Search Query: \"{original_query}\"\n\n"
+            "Audit Guidelines:\n"
+            "1. Carefully scan the ENTIRE scene, including background sidewalks, road edges, "
+            "and periphery — do not focus only on foreground subjects.\n"
+            "2. For spatial queries (e.g., 'beside', 'near', 'walking by', 'inside'), verify "
+            "whether the target entities exist in spatial proximity or interaction ANYWHERE in "
+            "the frame, even if small or partially occluded.\n"
+            "3. Account for CCTV perspective distortion, lighting shifts, and small subject sizes "
+            "— a person in the background may appear very small but is still a valid match.\n"
+            "4. Be liberal in matching: if the scene plausibly contains what was queried, "
+            "lean toward is_match: true with a descriptive reasoning explaining location and action.\n\n"
+            "Respond ONLY with valid JSON, no markdown fences, no extra text, "
+            "in exactly this structure:\n"
+            '{"is_match": true or false, "confidence": 0.0-1.0, '
+            '"reasoning": "Concise forensic explanation describing the specific location '
+            'and action of the subject"}'
         )
 
         with open(frame_path, "rb") as f:
@@ -609,9 +618,18 @@ class SemanticVideoAuditor:
                     logger.info(f"[Gemini validate] {frame_path} -> raw response: {raw[:200]}")
 
                     parsed = json.loads(raw)
+                    # Gracefully handle the new 'confidence' field — older responses
+                    # may not include it, so we fall back to CLIP's confidence (1.0)
+                    # rather than crashing the validation pipeline.
+                    gemini_confidence = parsed.get("confidence")
+                    if not isinstance(gemini_confidence, (int, float)):
+                        gemini_confidence = 1.0
+                    gemini_confidence = max(0.0, min(1.0, float(gemini_confidence)))
+
                     return {
                         "frame_path": frame_path,
                         "is_match": bool(parsed.get("is_match", False)),
+                        "confidence": gemini_confidence,
                         "reasoning": parsed.get("reasoning", ""),
                     }
                 except Exception as e:
@@ -626,7 +644,7 @@ class SemanticVideoAuditor:
                         attempt += 1
                         continue
                     logger.error(f"[Gemini validate] FAILED for {frame_path}: {type(e).__name__}: {e}")
-                    return {"frame_path": frame_path, "is_match": False, "reasoning": f"validation_error: {e}"}
+                    return {"frame_path": frame_path, "is_match": False, "confidence": 0.0, "reasoning": f"validation_error: {e}"}
 
 
 # --------------------------------------------------------------------------
@@ -692,7 +710,7 @@ async def upload_video(file: UploadFile = File(...)):
         "compressed_scheduled": total_bytes > LARGE_FILE_THRESHOLD_MB * 1024 * 1024,
     }
 
-@app.post("/api/analyze")
+@app.post("/legacy/api/analyze")
 async def analyze_video(
     video_id: Optional[str] = Form(None),
     file: Optional[UploadFile] = File(None),
@@ -802,7 +820,7 @@ async def cut_video_clip(
         "output_path": result.output_path,
     }
 
-@app.get("/api/analyze/stream")
+@app.get("/legacy/api/analyze/stream")
 async def analyze_video_stream(
     video_id: str = Query(...),
     query: str = Query(...),

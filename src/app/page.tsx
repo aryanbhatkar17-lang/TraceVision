@@ -92,7 +92,7 @@ export default function LandingPage() {
                 Step 2: Type What You Seek
               </div>
               <p className="text-xs text-slate-600 leading-relaxed pt-1">
-                Enter descriptions like <span className="font-semibold text-slate-800">"red motorbike"</span> or <span className="font-semibold text-slate-800">"person in dark hoodie"</span>.
+                Enter descriptions like <span className="font-semibold text-slate-800">&quot;red motorbike&quot;</span> or <span className="font-semibold text-slate-800">&quot;person in dark hoodie&quot;</span>.
               </p>
             </div>
 

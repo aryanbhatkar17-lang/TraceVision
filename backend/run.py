@@ -54,4 +54,4 @@ logger.info("  Device:         %s", os.environ.get("ZERO_DCE_DEVICE", "auto-dete
 logger.info("=" * 60)
 
 if __name__ == "__main__":
-    uvicorn.run("server:app", host=HOST, port=PORT, reload=True)
+    uvicorn.run("api:api", host=HOST, port=PORT, reload=True)
