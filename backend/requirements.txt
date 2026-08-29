@@ -44,3 +44,5 @@ pytest>=7.0.0                   # Test runner
 pytest-asyncio>=0.21.0          # Async test support for FastAPI endpoints
 
 python-dotenv>=1.0.0
+
+google-genai>=0.1.0
