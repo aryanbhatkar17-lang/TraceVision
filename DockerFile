@@ -1,0 +1,34 @@
+FROM python:3.10-slim
+
+# Install system dependencies required for OpenCV and FFmpeg
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    libgl1 \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy requirements from your backend folder
+COPY backend/requirements.txt .
+
+# Install dependencies with CPU-only PyTorch to prevent OOM errors on Render
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir torch torchvision --extra-index-url https://download.pytorch.org/whl/cpu && \
+    pip install --no-cache-dir -r requirements.txt
+
+# Copy all backend files into /app/backend
+COPY backend/ ./backend/
+
+# Set Python path so imports work correctly
+ENV PYTHONPATH=/app/backend
+
+EXPOSE 8000
+
+# Runs server.py (or api.py) inside backend
+CMD ["uvicorn", "backend.api:api", "--host", "0.0.0.0", "--port", "8000"]
+
+#Use server.py strictly for local testing and development where running python server.py is convenient, 
+#but rely on CMD ["uvicorn", "backend.api:api", "--host", "0.0.0.0", "--port", "8000"] for your production Docker image.  

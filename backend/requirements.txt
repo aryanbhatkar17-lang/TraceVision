@@ -31,6 +31,13 @@ numpy>=1.24.0
 psutil>=5.9.0                   # CPU + RAM monitoring (hardware_monitor.py)
 # pynvml>=11.0.0                # Optional: uncomment if GPU is present for VRAM monitoring
 
+# --- AI & Machine Learning ---
+# Note: Dockerfile installs CPU-only torch first to save memory.
+# Listed here for runtime import availability.
+torch>=2.0.0
+torchvision>=0.15.0
+transformers>=4.30.0
+
 # --- Testing & HTTP client ---
 httpx>=0.24.0                   # Async HTTP client used by test_api.py
 pytest>=7.0.0                   # Test runner
