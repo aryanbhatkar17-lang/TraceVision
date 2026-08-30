@@ -35,8 +35,17 @@ _gemini_client = genai.Client(api_key=_PIPELINE_GEMINI_KEY)
 TRANSLATION_MODEL = "gemini-3.5-flash-lite"
 
 # --- Tunable constants -------------------------------------------------
-CLIP_NOISE_FLOOR = 0.10   # Low floor keeps compositional/spatial queries alive
-CLIP_TOP_K       = 25     # Gemini validation slots (one per uniform timeline bin)
+CLIP_NOISE_FLOOR    = 0.10  # Low floor keeps compositional/spatial queries alive
+CLIP_TOP_K          = 50    # Number of uniform timeline bins to slice the video into.
+                            # Since all candidates go in one Gemini batch call (no
+                            # per-frame quota cost), doubling from 25→50 halves the
+                            # blind-spot window from ~82s to ~41s on a 34-min video.
+CLIP_PEAKS_PER_BIN  = 2    # Top-N CLIP candidates to keep per bin.
+                            # Diagnostic: the 11:47 orange truck scored 0.2469 while
+                            # an Eddie Stobart truck at 11:42 scored 0.2745 in the
+                            # same bin. Single-winner binning discarded 11:47 entirely.
+                            # With N=2, both candidates reach Gemini; Gemini correctly
+                            # rejects 11:42 (green truck) and confirms 11:47 (orange).
 # ------------------------------------------------------------------------
 
 
@@ -302,13 +311,22 @@ async def _run_search_pipeline(video_path: str, raw_query: str, smoother: "Tempo
         above_noise_floor = [f for f in raw_scores if f["confidence"] >= CLIP_NOISE_FLOOR]
 
         # ------------------------------------------------------------------
-        # Temporal Sub-Window Peak Sampling (Timeline-Aware Bucketing)
-        # Fixes "Timeline Wipeout": On a 34-minute video, a simple Top-K
-        # always pulls frames from the first few minutes (where high-traffic
-        # scenes produce hundreds of high scores) and discards everything after.
-        # Fix: divide the FULL timeline into exactly CLIP_TOP_K uniform bins and
-        # take only the peak-confidence candidate from each bin. This guarantees
-        # Gemini sees exactly one representative frame from every time segment.
+        # Temporal Sub-Window Peak Sampling — Top-N Per Bin
+        #
+        # ROOT CAUSE FIX: "Binning Collision" false negatives.
+        # Empirically traced on the 34-min orange-truck video:
+        #   - Bin 8 (10:55–12:17): Eddie Stobart green truck at 11:42 scored
+        #     0.2745 CLIP; real orange truck at 11:47 scored 0.2469.
+        #   - Old single-winner logic: 11:42 wins → 11:47 is discarded forever.
+        #   - Gemini sees 11:42, correctly says "no orange truck" → false negative.
+        #
+        # Fix: keep CLIP_PEAKS_PER_BIN=2 candidates per bin. Both the 11:42
+        # false-positive and 11:47 real-positive are forwarded to Gemini. Gemini
+        # then independently rejects 11:42 (green) and confirms 11:47 (orange).
+        #
+        # Combined with CLIP_TOP_K=50 bins (vs 25), the total candidate budget is
+        # up to 50×2=100 frames — still a single Gemini batch call, so zero extra
+        # quota cost while halving the blind-spot window and adding redundancy.
         # ------------------------------------------------------------------
         if not above_noise_floor:
             return {"query": raw_query, "clip_query": clip_query, "matches": [], "clips": []}
@@ -318,24 +336,37 @@ async def _run_search_pipeline(video_path: str, raw_query: str, smoother: "Tempo
         max_ts = scored_by_time[-1]["timestamp_seconds"]
         timeline_duration = max_ts - min_ts
 
-        # e.g. 2040s / 25 bins = 81.6s per bin for a 34-minute video
+        # e.g. 2048s / 50 bins = ~41s per bin for a 34-min video (was 82s at 25 bins)
         bin_size = max(timeline_duration / CLIP_TOP_K, 1.0)
 
-        bins: Dict[int, Dict[str, float]] = {}
+        # bins[bin_idx] = list of top-N frames by confidence in that bin
+        bins: Dict[int, List[Dict[str, float]]] = {}
         for frame in scored_by_time:
             bin_idx = int((frame["timestamp_seconds"] - min_ts) / bin_size)
             bin_idx = min(bin_idx, CLIP_TOP_K - 1)  # clamp boundary edge case
-            if bin_idx not in bins or frame["confidence"] > bins[bin_idx]["confidence"]:
-                bins[bin_idx] = frame
 
-        # Already in chronological order (dict keys are bin indices)
-        top_candidates = [bins[idx] for idx in sorted(bins.keys())]
+            if bin_idx not in bins:
+                bins[bin_idx] = []
+
+            peaks = bins[bin_idx]
+            peaks.append(frame)
+            # Keep only the top-N by confidence; sort descending and trim
+            peaks.sort(key=lambda f: f["confidence"], reverse=True)
+            bins[bin_idx] = peaks[:CLIP_PEAKS_PER_BIN]
+
+        # Flatten all bins, restore chronological order (critical for Gemini's
+        # frame-index-to-timestamp mapping and the temporal smoother)
+        top_candidates: List[Dict[str, float]] = []
+        for bin_idx in sorted(bins.keys()):
+            top_candidates.extend(bins[bin_idx])
+        top_candidates.sort(key=lambda f: f["timestamp_seconds"])
 
         logger.info(
             f"[Stage 3] CLIP retrieved {len(raw_scores)} scored frames, "
             f"{len(above_noise_floor)} above noise floor ({CLIP_NOISE_FLOOR}). "
-            f"Timeline ({timeline_duration:.1f}s) split into {CLIP_TOP_K} bins of {bin_size:.1f}s. "
-            f"Selected {len(top_candidates)} chronological peaks for Gemini validation."
+            f"Timeline ({timeline_duration:.1f}s) split into {CLIP_TOP_K} bins of "
+            f"{bin_size:.1f}s (top {CLIP_PEAKS_PER_BIN} per bin). "
+            f"Selected {len(top_candidates)} candidates for Gemini validation."
         )
 
         if not top_candidates:
