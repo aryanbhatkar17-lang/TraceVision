@@ -646,19 +646,29 @@ class SemanticVideoAuditor:
                 while True:
                     try:
                         logger.info(f"[Gemini batch] Sending chunk {chunk_idx+1}/{len(chunks)} ({n} frames)...")
+                        
+                        # Force strict JSON output to prevent parse errors
+                        config = types.GenerateContentConfig(
+                            response_mime_type="application/json"
+                        )
+                        
                         response = await asyncio.to_thread(
                             _gemini_client.models.generate_content,
                             model=VALIDATION_MODEL,
                             contents=contents,
+                            config=config,
                         )
 
                         raw = (response.text or "").strip()
                         
-                        # Robust JSON array extraction: find first '[' and last ']'
-                        start_idx = raw.find("[")
-                        end_idx = raw.rfind("]")
-                        if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
-                            raw = raw[start_idx : end_idx + 1]
+                        # Fallback markdown stripping just in case the model ignores mime_type
+                        if raw.startswith("```"):
+                            raw = raw.split("```", 2)[1]
+                            if raw.lower().startswith("json"):
+                                raw = raw[4:]
+                            raw = raw.strip()
+                            if raw.endswith("```"):
+                                raw = raw[:-3].strip()
                         
                         try:
                             parsed_array = json.loads(raw)
