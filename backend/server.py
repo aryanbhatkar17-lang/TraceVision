@@ -591,154 +591,134 @@ class SemanticVideoAuditor:
         self, frame_paths: List[str], original_query: str, max_retries: int = 3
     ) -> List[Dict[str, Any]]:
         """
-        Sends all frames to Gemini in a single multimodal request and parses
-        the returned JSON array.
-
-        Payload structure (order matters — model reads it top-to-bottom):
-          [text: system prompt + query + instructions]
-          [image: frame_0001.jpg]  ← Frame 1
-          [image: frame_0002.jpg]  ← Frame 2
-          ...
-          [image: frame_00NN.jpg]  ← Frame N
-          [text: "Now output your JSON array."]  ← closing trigger
-
-        The model returns a JSON array where index i corresponds to frame i.
+        Sends frames to Gemini in multimodal batch requests.
+        To prevent output truncation (JSON arrays stopping early due to max token limits)
+        and attention dilution with 100 frames, we sub-batch into chunks of 25.
+        Chunks run concurrently under the semaphore(2) limit.
         """
-        from google.genai import types  # local import keeps top-level imports lean
+        CHUNK_SIZE = 25
+        results: List[Dict[str, Any]] = []
 
-        n = len(frame_paths)
-        filenames = [os.path.basename(p) for p in frame_paths]
+        chunks = [frame_paths[i:i + CHUNK_SIZE] for i in range(0, len(frame_paths), CHUNK_SIZE)]
+        logger.info(f"[Gemini batch] Processing {len(frame_paths)} frames in {len(chunks)} chunk(s) of max {CHUNK_SIZE}...")
 
-        # ----------------------------------------------------------------
-        # Build the system/instruction text part (sent FIRST)
-        # ----------------------------------------------------------------
-        system_prompt = (
-            f"You are an expert CCTV forensic investigator. "
-            f"You are receiving a chronological sequence of {n} frames extracted from a surveillance video.\n\n"
-            f"Officer's Search Query: \"{original_query}\"\n\n"
-            "Audit Guidelines (apply to EVERY frame):\n"
-            "1. Scan the ENTIRE scene — background sidewalks, road edges, and periphery. "
-            "Do not focus only on foreground subjects.\n"
-            "2. For spatial queries ('beside', 'near', 'walking by', 'inside'), verify whether "
-            "the target entities exist in spatial proximity ANYWHERE in the frame, even if "
-            "small or partially occluded.\n"
-            "3. Account for CCTV perspective distortion, lighting shifts, and small subject sizes "
-            "— a person in the background may appear very small but is still a valid match.\n"
-            "4. Be liberal in matching: if the scene plausibly contains what was queried, "
-            "lean toward is_match: true with a descriptive forensic reasoning.\n\n"
-            f"The {n} frames follow this message in order. "
-            f"Their filenames, in order, are:\n"
-            + "\n".join(f"  Frame {i+1}: {fn}" for i, fn in enumerate(filenames))
-            + "\n\n"
-            "After viewing all frames, respond ONLY with a valid JSON array — no markdown fences, "
-            "no extra text. The array must have EXACTLY one object per frame, in the same order "
-            "as the input frames. Each object must have these fields:\n"
-            '  "frame_identifier": (string) the filename of that frame,\n'
-            '  "is_match": (boolean) true if the frame contains what the officer is searching for,\n'
-            '  "confidence": (float 0.0–1.0) your confidence in the match judgment,\n'
-            '  "reasoning": (string) concise forensic explanation of what you see and where.\n\n'
-            "Output the JSON array now:"
-        )
+        async def _process_chunk(chunk_paths: List[str], chunk_idx: int) -> List[Dict[str, Any]]:
+            from google.genai import types
 
-        # ----------------------------------------------------------------
-        # Build the contents list: [text_prompt, img1, img2, ..., imgN]
-        # ----------------------------------------------------------------
-        contents = [system_prompt]
+            n = len(chunk_paths)
+            filenames = [os.path.basename(p) for p in chunk_paths]
 
-        for frame_path in frame_paths:
-            with open(frame_path, "rb") as f:
-                image_bytes = f.read()
-            contents.append(
-                types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg")
+            system_prompt = (
+                f"You are an expert CCTV forensic investigator. "
+                f"You are receiving a chronological sequence of {n} frames extracted from a surveillance video.\n\n"
+                f"Officer's Search Query: \"{original_query}\"\n\n"
+                "Audit Guidelines (apply to EVERY frame):\n"
+                "1. Scan the ENTIRE scene — background sidewalks, road edges, and periphery. "
+                "Do not focus only on foreground subjects.\n"
+                "2. For spatial queries ('beside', 'near', 'walking by', 'inside'), verify whether "
+                "the target entities exist in spatial proximity ANYWHERE in the frame, even if "
+                "small or partially occluded.\n"
+                "3. Account for CCTV perspective distortion, lighting shifts, and small subject sizes "
+                "— a person in the background may appear very small but is still a valid match.\n"
+                "4. Be liberal in matching: if the scene plausibly contains what was queried, "
+                "lean toward is_match: true with a descriptive forensic reasoning.\n\n"
+                f"The {n} frames follow this message in order. "
+                f"Their filenames, in order, are:\n"
+                + "\n".join(f"  Frame {i+1}: {fn}" for i, fn in enumerate(filenames))
+                + "\n\n"
+                "After viewing all frames, respond ONLY with a valid JSON array — no markdown fences, "
+                "no extra text. The array must have EXACTLY one object per frame, in the same order "
+                "as the input frames. Each object must have these fields:\n"
+                '  "frame_identifier": (string) the filename of that frame,\n'
+                '  "is_match": (boolean) true if the frame contains what the officer is searching for,\n'
+                '  "confidence": (float 0.0–1.0) your confidence in the match judgment,\n'
+                '  "reasoning": (string) concise forensic explanation of what you see and where.\n\n'
+                "Output the JSON array now:"
             )
 
-        # ----------------------------------------------------------------
-        # Single API call with retry on rate-limit only
-        # ----------------------------------------------------------------
-        attempt = 0
-        while True:
-            try:
-                logger.info(
-                    f"[Gemini batch] Sending {n} frames in one request "
-                    f"(model={VALIDATION_MODEL})..."
-                )
-                response = await asyncio.to_thread(
-                    _gemini_client.models.generate_content,
-                    model=VALIDATION_MODEL,
-                    contents=contents,
-                )
+            contents = [system_prompt]
+            for p in chunk_paths:
+                with open(p, "rb") as f:
+                    contents.append(types.Part.from_bytes(data=f.read(), mime_type="image/jpeg"))
 
-                raw = (response.text or "").strip()
-
-                # Strip markdown fences if model wraps output anyway
-                if raw.startswith("```"):
-                    raw = raw.split("```", 2)[1]
-                    if raw.lower().startswith("json"):
-                        raw = raw[4:]
-                    raw = raw.strip()
-                    if raw.endswith("```"):
-                        raw = raw[:-3].strip()
-
-                logger.info(f"[Gemini batch] Raw response (first 300 chars): {raw[:300]}")
-
-                parsed_array = json.loads(raw)
-
-                if not isinstance(parsed_array, list):
-                    raise ValueError(
-                        f"Expected JSON array from Gemini batch, got {type(parsed_array).__name__}"
-                    )
-
-                # ----------------------------------------------------------------
-                # Map parsed array back to the standard per-frame result dict
-                # the rest of pipeline.py expects:
-                #   {"frame_path": str, "is_match": bool, "confidence": float, "reasoning": str}
-                # ----------------------------------------------------------------
-                results: List[Dict[str, Any]] = []
-
-                for i, frame_path in enumerate(frame_paths):
-                    # Gracefully handle short responses (model may skip trailing
-                    # non-match frames to save tokens)
-                    if i < len(parsed_array):
-                        item = parsed_array[i]
-                    else:
-                        logger.warning(
-                            f"[Gemini batch] Response has {len(parsed_array)} items "
-                            f"but expected {n}. Treating missing frame {i+1} as non-match."
+            async with self._validation_semaphore:
+                attempt = 0
+                while True:
+                    try:
+                        logger.info(f"[Gemini batch] Sending chunk {chunk_idx+1}/{len(chunks)} ({n} frames)...")
+                        response = await asyncio.to_thread(
+                            _gemini_client.models.generate_content,
+                            model=VALIDATION_MODEL,
+                            contents=contents,
                         )
-                        item = {}
 
-                    confidence = item.get("confidence")
-                    if not isinstance(confidence, (int, float)):
-                        confidence = 1.0
-                    confidence = max(0.0, min(1.0, float(confidence)))
+                        raw = (response.text or "").strip()
+                        if raw.startswith("```"):
+                            raw = raw.split("```", 2)[1]
+                            if raw.lower().startswith("json"):
+                                raw = raw[4:]
+                            raw = raw.strip()
+                            if raw.endswith("```"):
+                                raw = raw[:-3].strip()
 
-                    results.append({
-                        "frame_path": frame_path,
-                        "is_match": bool(item.get("is_match", False)),
-                        "confidence": confidence,
-                        "reasoning": item.get("reasoning", ""),
-                    })
+                        parsed_array = json.loads(raw)
+                        if not isinstance(parsed_array, list):
+                            raise ValueError(f"Expected JSON array, got {type(parsed_array).__name__}")
 
-                match_count = sum(1 for r in results if r["is_match"])
-                logger.info(
-                    f"[Gemini batch] Parsed {len(results)} results. "
-                    f"{match_count}/{n} frames matched."
-                )
-                return results
+                        chunk_results: List[Dict[str, Any]] = []
+                        for i, frame_path in enumerate(chunk_paths):
+                            if i < len(parsed_array):
+                                item = parsed_array[i]
+                            else:
+                                logger.warning(
+                                    f"[Gemini batch] Chunk {chunk_idx+1} truncated: "
+                                    f"has {len(parsed_array)} items but expected {n}. "
+                                    f"Treating missing frame {i+1} as non-match."
+                                )
+                                item = {}
 
-            except Exception as e:
-                is_rate_limit = "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e)
-                if is_rate_limit and attempt < max_retries:
-                    wait_s = 15 * (2 ** attempt)  # 15s, 30s, 60s
-                    logger.warning(
-                        f"[Gemini batch] Rate limited, retrying in {wait_s}s "
-                        f"(attempt {attempt + 1}/{max_retries})..."
-                    )
-                    await asyncio.sleep(wait_s)
-                    attempt += 1
-                    continue
-                # Re-raise so validate_frames() can catch and fall back
-                raise
+                            confidence = item.get("confidence")
+                            if not isinstance(confidence, (int, float)):
+                                confidence = 1.0
+                            confidence = max(0.0, min(1.0, float(confidence)))
+
+                            chunk_results.append({
+                                "frame_path": frame_path,
+                                "is_match": bool(item.get("is_match", False)),
+                                "confidence": confidence,
+                                "reasoning": item.get("reasoning", ""),
+                            })
+
+                        return chunk_results
+
+                    except Exception as e:
+                        is_rate_limit = "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e)
+                        if is_rate_limit and attempt < max_retries:
+                            wait_s = 15 * (2 ** attempt)
+                            logger.warning(
+                                f"[Gemini batch] Chunk {chunk_idx+1} rate limited, "
+                                f"retrying in {wait_s}s (attempt {attempt+1}/{max_retries})..."
+                            )
+                            await asyncio.sleep(wait_s)
+                            attempt += 1
+                            continue
+                        logger.error(f"[Gemini batch] Chunk {chunk_idx+1} failed: {type(e).__name__}: {e}")
+                        raise
+
+        # Run chunks concurrently under the semaphore limit
+        tasks = [_process_chunk(chunk, idx) for idx, chunk in enumerate(chunks)]
+        chunked_results = await asyncio.gather(*tasks)
+
+        # Flatten list of lists back into a single list
+        for cr in chunked_results:
+            results.extend(cr)
+
+        match_count = sum(1 for r in results if r["is_match"])
+        logger.info(
+            f"[Gemini batch] All chunks complete. Parsed {len(results)} results total. "
+            f"{match_count}/{len(frame_paths)} frames matched."
+        )
+        return results
 
     async def _validate_frames_sequential(
         self, frame_paths: List[str], original_query: str
