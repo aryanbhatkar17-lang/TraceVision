@@ -556,57 +556,202 @@ class SemanticVideoAuditor:
 
     def __init__(self):
         self.gemini_api_key = os.environ.get("GEMINI_API_KEY", "")
-        # Instance-level semaphore: caps concurrent Gemini HTTP calls to 2.
-        # This prevents the free-tier RPM burst limit from being hit when
-        # asyncio.gather fires all coroutines at once. At most 2 will ever
-        # be inside generate_content at the same time.
-        self._validation_semaphore = asyncio.Semaphore(2)
-
-    # Seconds to pause between each validated frame call.
-    # Free tier: 15 RPM = 1 req per 4s to stay safely below the limit.
-    # With semaphore(2) + 4s delay each, peak rate = 2/4s = 0.5 RPS = 30 RPM
-    # but since calls are sequential, real rate is ~1 request every 4s = 15 RPM.
-    _INTER_REQUEST_DELAY_S: float = 4.0
 
     async def validate_frames(self, frame_paths: List[str], original_query: str) -> List[Dict[str, Any]]:
         """
-        Sends each CLIP candidate frame + the officer's original raw query to Gemini
-        multimodal for a strict true/false spatial judgment.
+        Validates all CLIP candidate frames in a SINGLE Gemini multimodal API call.
 
-        WHY SEQUENTIAL INSTEAD OF asyncio.gather:
-        asyncio.gather launches all N coroutines simultaneously. Even with a
-        semaphore(2), all 25 coroutines queue up immediately. When the first
-        wave gets a 429, it sleeps 15s inside the semaphore slot, blocking the
-        next 23 queued coroutines for the full retry duration — causing a
-        10-minute hang.
+        WHY BATCHING (1 request vs 25):
+        - Free tier quota: 1,500 RPD (Requests Per Day).
+          Old sequential approach: 25 RPD per search → max 60 searches/day.
+          New batch approach: 1 RPD per search → max 1,500 searches/day (25× improvement).
+        - All frames arrive in one request, so Gemini can also reason about
+          relative scene changes across the timeline (temporal context).
+        - Eliminates the 4s × 25 = 100s sequential delay entirely; one call
+          completes in ~5-10 seconds.
 
-        Sequential processing with a mandatory 4s inter-request delay is
-        far more reliable on the free tier:
-          - 25 frames × 4s = ~100s total worst case (no 429s at all)
-          - If a 429 does occur, only the single failing frame retries —
-            no backlog of 23 coroutines amplifying the wait.
+        FALLBACK:
+        If the batch call fails for any reason (context window exceeded, parse
+        error, 429), it automatically falls back to the original per-frame
+        sequential path so the pipeline never hard-crashes.
         """
+        if not frame_paths:
+            return []
+
+        try:
+            return await self._validate_frames_batch(frame_paths, original_query)
+        except Exception as e:
+            logger.warning(
+                f"[Gemini batch] Batch call failed ({type(e).__name__}: {e}). "
+                f"Falling back to sequential per-frame validation..."
+            )
+            return await self._validate_frames_sequential(frame_paths, original_query)
+
+    async def _validate_frames_batch(
+        self, frame_paths: List[str], original_query: str, max_retries: int = 3
+    ) -> List[Dict[str, Any]]:
+        """
+        Sends all frames to Gemini in a single multimodal request and parses
+        the returned JSON array.
+
+        Payload structure (order matters — model reads it top-to-bottom):
+          [text: system prompt + query + instructions]
+          [image: frame_0001.jpg]  ← Frame 1
+          [image: frame_0002.jpg]  ← Frame 2
+          ...
+          [image: frame_00NN.jpg]  ← Frame N
+          [text: "Now output your JSON array."]  ← closing trigger
+
+        The model returns a JSON array where index i corresponds to frame i.
+        """
+        from google.genai import types  # local import keeps top-level imports lean
+
+        n = len(frame_paths)
+        filenames = [os.path.basename(p) for p in frame_paths]
+
+        # ----------------------------------------------------------------
+        # Build the system/instruction text part (sent FIRST)
+        # ----------------------------------------------------------------
+        system_prompt = (
+            f"You are an expert CCTV forensic investigator. "
+            f"You are receiving a chronological sequence of {n} frames extracted from a surveillance video.\n\n"
+            f"Officer's Search Query: \"{original_query}\"\n\n"
+            "Audit Guidelines (apply to EVERY frame):\n"
+            "1. Scan the ENTIRE scene — background sidewalks, road edges, and periphery. "
+            "Do not focus only on foreground subjects.\n"
+            "2. For spatial queries ('beside', 'near', 'walking by', 'inside'), verify whether "
+            "the target entities exist in spatial proximity ANYWHERE in the frame, even if "
+            "small or partially occluded.\n"
+            "3. Account for CCTV perspective distortion, lighting shifts, and small subject sizes "
+            "— a person in the background may appear very small but is still a valid match.\n"
+            "4. Be liberal in matching: if the scene plausibly contains what was queried, "
+            "lean toward is_match: true with a descriptive forensic reasoning.\n\n"
+            f"The {n} frames follow this message in order. "
+            f"Their filenames, in order, are:\n"
+            + "\n".join(f"  Frame {i+1}: {fn}" for i, fn in enumerate(filenames))
+            + "\n\n"
+            "After viewing all frames, respond ONLY with a valid JSON array — no markdown fences, "
+            "no extra text. The array must have EXACTLY one object per frame, in the same order "
+            "as the input frames. Each object must have these fields:\n"
+            '  "frame_identifier": (string) the filename of that frame,\n'
+            '  "is_match": (boolean) true if the frame contains what the officer is searching for,\n'
+            '  "confidence": (float 0.0–1.0) your confidence in the match judgment,\n'
+            '  "reasoning": (string) concise forensic explanation of what you see and where.\n\n'
+            "Output the JSON array now:"
+        )
+
+        # ----------------------------------------------------------------
+        # Build the contents list: [text_prompt, img1, img2, ..., imgN]
+        # ----------------------------------------------------------------
+        contents = [system_prompt]
+
+        for frame_path in frame_paths:
+            with open(frame_path, "rb") as f:
+                image_bytes = f.read()
+            contents.append(
+                types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg")
+            )
+
+        # ----------------------------------------------------------------
+        # Single API call with retry on rate-limit only
+        # ----------------------------------------------------------------
+        attempt = 0
+        while True:
+            try:
+                logger.info(
+                    f"[Gemini batch] Sending {n} frames in one request "
+                    f"(model={VALIDATION_MODEL})..."
+                )
+                response = await asyncio.to_thread(
+                    _gemini_client.models.generate_content,
+                    model=VALIDATION_MODEL,
+                    contents=contents,
+                )
+
+                raw = (response.text or "").strip()
+
+                # Strip markdown fences if model wraps output anyway
+                if raw.startswith("```"):
+                    raw = raw.split("```", 2)[1]
+                    if raw.lower().startswith("json"):
+                        raw = raw[4:]
+                    raw = raw.strip()
+                    if raw.endswith("```"):
+                        raw = raw[:-3].strip()
+
+                logger.info(f"[Gemini batch] Raw response (first 300 chars): {raw[:300]}")
+
+                parsed_array = json.loads(raw)
+
+                if not isinstance(parsed_array, list):
+                    raise ValueError(
+                        f"Expected JSON array from Gemini batch, got {type(parsed_array).__name__}"
+                    )
+
+                # ----------------------------------------------------------------
+                # Map parsed array back to the standard per-frame result dict
+                # the rest of pipeline.py expects:
+                #   {"frame_path": str, "is_match": bool, "confidence": float, "reasoning": str}
+                # ----------------------------------------------------------------
+                results: List[Dict[str, Any]] = []
+
+                for i, frame_path in enumerate(frame_paths):
+                    # Gracefully handle short responses (model may skip trailing
+                    # non-match frames to save tokens)
+                    if i < len(parsed_array):
+                        item = parsed_array[i]
+                    else:
+                        logger.warning(
+                            f"[Gemini batch] Response has {len(parsed_array)} items "
+                            f"but expected {n}. Treating missing frame {i+1} as non-match."
+                        )
+                        item = {}
+
+                    confidence = item.get("confidence")
+                    if not isinstance(confidence, (int, float)):
+                        confidence = 1.0
+                    confidence = max(0.0, min(1.0, float(confidence)))
+
+                    results.append({
+                        "frame_path": frame_path,
+                        "is_match": bool(item.get("is_match", False)),
+                        "confidence": confidence,
+                        "reasoning": item.get("reasoning", ""),
+                    })
+
+                match_count = sum(1 for r in results if r["is_match"])
+                logger.info(
+                    f"[Gemini batch] Parsed {len(results)} results. "
+                    f"{match_count}/{n} frames matched."
+                )
+                return results
+
+            except Exception as e:
+                is_rate_limit = "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e)
+                if is_rate_limit and attempt < max_retries:
+                    wait_s = 15 * (2 ** attempt)  # 15s, 30s, 60s
+                    logger.warning(
+                        f"[Gemini batch] Rate limited, retrying in {wait_s}s "
+                        f"(attempt {attempt + 1}/{max_retries})..."
+                    )
+                    await asyncio.sleep(wait_s)
+                    attempt += 1
+                    continue
+                # Re-raise so validate_frames() can catch and fall back
+                raise
+
+    async def _validate_frames_sequential(
+        self, frame_paths: List[str], original_query: str
+    ) -> List[Dict[str, Any]]:
+        """
+        Fallback: validates frames one-by-one with a 4s delay between each.
+        Only triggered if the batch call fails (context window exceeded, etc.).
+        """
+        from google.genai import types
+
         results: List[Dict[str, Any]] = []
         total = len(frame_paths)
 
-        for idx, frame_path in enumerate(frame_paths):
-            logger.info(
-                f"[Gemini validate] Processing frame {idx + 1}/{total}: "
-                f"{os.path.basename(frame_path)}"
-            )
-            result = await self._validate_single_frame(frame_path, original_query)
-            results.append(result)
-
-            # Hard delay between requests to stay under 15 RPM free-tier limit.
-            # Skip delay after the last frame (no next request to pace).
-            if idx < total - 1:
-                await asyncio.sleep(self._INTER_REQUEST_DELAY_S)
-
-        return results
-
-    async def _validate_single_frame(
-        self, frame_path: str, original_query: str, max_retries: int = 3
-    ) -> Dict[str, Any]:
         prompt = (
             "You are an expert CCTV forensic investigator reviewing surveillance video frames. "
             "Your task is to determine whether this frame contains what the officer is looking for.\n\n"
@@ -628,13 +773,16 @@ class SemanticVideoAuditor:
             'and action of the subject"}'
         )
 
-        with open(frame_path, "rb") as f:
-            image_bytes = f.read()
+        for idx, frame_path in enumerate(frame_paths):
+            logger.info(
+                f"[Gemini sequential fallback] Processing frame {idx + 1}/{total}: "
+                f"{os.path.basename(frame_path)}"
+            )
+            with open(frame_path, "rb") as f:
+                image_bytes = f.read()
 
-        from google.genai import types  # local import keeps top-level imports lean
-
-        async with self._validation_semaphore:
             attempt = 0
+            max_retries = 3
             while True:
                 try:
                     response = await asyncio.to_thread(
@@ -645,47 +793,50 @@ class SemanticVideoAuditor:
                             prompt,
                         ],
                     )
-
                     raw = (response.text or "").strip().strip("`")
                     if raw.lower().startswith("json"):
                         raw = raw[4:].strip()
 
-                    logger.info(f"[Gemini validate] {frame_path} -> raw response: {raw[:200]}")
-
                     parsed = json.loads(raw)
-                    gemini_confidence = parsed.get("confidence")
-                    if not isinstance(gemini_confidence, (int, float)):
-                        gemini_confidence = 1.0
-                    gemini_confidence = max(0.0, min(1.0, float(gemini_confidence)))
+                    confidence = parsed.get("confidence")
+                    if not isinstance(confidence, (int, float)):
+                        confidence = 1.0
+                    confidence = max(0.0, min(1.0, float(confidence)))
 
-                    return {
+                    results.append({
                         "frame_path": frame_path,
                         "is_match": bool(parsed.get("is_match", False)),
-                        "confidence": gemini_confidence,
+                        "confidence": confidence,
                         "reasoning": parsed.get("reasoning", ""),
-                    }
+                    })
+                    break
                 except Exception as e:
                     is_rate_limit = "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e)
                     if is_rate_limit and attempt < max_retries:
-                        # Exponential backoff: 10s, 20s, 40s
                         wait_s = 10 * (2 ** attempt)
                         logger.warning(
-                            f"[Gemini validate] Rate limited on {os.path.basename(frame_path)}, "
-                            f"retrying in {wait_s}s (attempt {attempt + 1}/{max_retries})..."
+                            f"[Gemini sequential fallback] Rate limited on "
+                            f"{os.path.basename(frame_path)}, retrying in {wait_s}s..."
                         )
                         await asyncio.sleep(wait_s)
                         attempt += 1
                         continue
                     logger.error(
-                        f"[Gemini validate] FAILED for {os.path.basename(frame_path)}: "
-                        f"{type(e).__name__}: {e}"
+                        f"[Gemini sequential fallback] FAILED for "
+                        f"{os.path.basename(frame_path)}: {type(e).__name__}: {e}"
                     )
-                    return {
+                    results.append({
                         "frame_path": frame_path,
                         "is_match": False,
                         "confidence": 0.0,
                         "reasoning": f"validation_error: {e}",
-                    }
+                    })
+                    break
+
+            if idx < total - 1:
+                await asyncio.sleep(4.0)
+
+        return results
 
 
 # --------------------------------------------------------------------------
