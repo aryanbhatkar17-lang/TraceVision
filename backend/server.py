@@ -653,15 +653,19 @@ class SemanticVideoAuditor:
                         )
 
                         raw = (response.text or "").strip()
-                        if raw.startswith("```"):
-                            raw = raw.split("```", 2)[1]
-                            if raw.lower().startswith("json"):
-                                raw = raw[4:]
-                            raw = raw.strip()
-                            if raw.endswith("```"):
-                                raw = raw[:-3].strip()
+                        
+                        # Robust JSON array extraction: find first '[' and last ']'
+                        start_idx = raw.find("[")
+                        end_idx = raw.rfind("]")
+                        if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+                            raw = raw[start_idx : end_idx + 1]
+                        
+                        try:
+                            parsed_array = json.loads(raw)
+                        except json.JSONDecodeError as je:
+                            logger.error(f"[Gemini batch] JSON parse error in chunk {chunk_idx+1}: {je}\nRaw text: {raw[:200]}")
+                            raise ValueError(f"Failed to parse JSON array: {je}")
 
-                        parsed_array = json.loads(raw)
                         if not isinstance(parsed_array, list):
                             raise ValueError(f"Expected JSON array, got {type(parsed_array).__name__}")
 
@@ -707,10 +711,22 @@ class SemanticVideoAuditor:
 
         # Run chunks concurrently under the semaphore limit
         tasks = [_process_chunk(chunk, idx) for idx, chunk in enumerate(chunks)]
-        chunked_results = await asyncio.gather(*tasks)
+        chunked_results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # Flatten list of lists back into a single list
-        for cr in chunked_results:
+        # Flatten list of lists back into a single list, handling exceptions
+        for idx, cr in enumerate(chunked_results):
+            if isinstance(cr, Exception):
+                logger.error(f"[Gemini batch] Chunk {idx+1} failed with exception: {cr}. Falling back to sequential for this chunk ({len(chunks[idx])} frames).")
+                try:
+                    cr = await self._validate_frames_sequential(chunks[idx], original_query)
+                except Exception as seq_err:
+                    logger.error(f"[Gemini batch] Sequential fallback also failed for chunk {idx+1}: {seq_err}")
+                    cr = [{
+                        "frame_path": p, 
+                        "is_match": False, 
+                        "confidence": 0.0, 
+                        "reasoning": f"Chunk failed entirely: {seq_err}"
+                    } for p in chunks[idx]]
             results.extend(cr)
 
         match_count = sum(1 for r in results if r["is_match"])
