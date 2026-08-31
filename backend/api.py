@@ -198,7 +198,6 @@ async def search_video(request: SearchRequest):
 
     pipeline_result = await _run_search_pipeline(str(video_path), request.query, smoother)
     response = _pipeline_result_to_response(request.video_id, pipeline_result)
-    response["matches"] = response["matches"][: request.top_k]
     return response
 
 @api.post("/api/search/form")
@@ -214,7 +213,6 @@ async def search_video_form(
 
     pipeline_result = await _run_search_pipeline(str(video_path), query, smoother)
     response = _pipeline_result_to_response(video_id, pipeline_result)
-    response["matches"] = response["matches"][:top_k]
     return response
 
 @api.post("/api/analyze")
