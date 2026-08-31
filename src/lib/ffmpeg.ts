@@ -1,39 +1,15 @@
-import ffmpeg from 'fluent-ffmpeg';
-import ffmpegStatic from 'ffmpeg-static';
-import path from 'path';
-import fs from 'fs';
+/**
+ * ffmpeg.ts — DEPRECATED / STUB
+ * ==============================
+ * This file is intentionally empty. FFmpeg loading is now handled
+ * entirely inside compress-worker.ts via importScripts() from the UMD
+ * CDN, which bypasses Webpack's module resolver.
+ *
+ * DO NOT re-add any @ffmpeg/ffmpeg or @ffmpeg/util imports here.
+ * Importing those packages on the main thread causes Webpack to
+ * intercept their internal dynamic import(blobURL) calls at runtime,
+ * crashing with:
+ *   "Error: Cannot find module 'blob:http://localhost:3000/...'"
+ */
 
-if (ffmpegStatic) {
-    ffmpeg.setFfmpegPath(ffmpegStatic);
-}
-
-interface FrameExtractionOptions {
-    videoPath: string;
-    outputDir: string;
-    fps?: number; // e.g., 1 for 1 frame/sec, 0.5 for 1 frame every 2 sec
-}
-
-export async function extractFrames({
-    videoPath,
-    outputDir,
-    fps = 1,
-}: FrameExtractionOptions): Promise<string[]> {
-    if (!fs.existsSync(outputDir)) {
-        fs.mkdirSync(outputDir, { recursive: true });
-    }
-
-    return new Promise((resolve, reject) => {
-        ffmpeg(videoPath)
-            .outputOptions([`-vf fps=${fps}`, '-qscale:v 2']) // High JPEG quality
-            .output(path.join(outputDir, 'frame_%04d.jpg'))
-            .on('end', () => {
-                const files = fs
-                    .readdirSync(outputDir)
-                    .filter((f) => f.endsWith('.jpg'))
-                    .map((f) => path.join(outputDir, f));
-                resolve(files);
-            })
-            .on('error', (err) => reject(err))
-            .run();
-    });
-}
+export {};

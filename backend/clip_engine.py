@@ -5,8 +5,13 @@ Loads CLIP ViT-B/32 once as a singleton and exposes evaluate_video_frames(),
 which scores every extracted JPEG in a directory against a text query using
 cosine similarity between CLIP's image and text embeddings.
 
-Frame filenames must match pipeline.py's _extract_frames_opencv() output:
-"frame_<timestamp_seconds:.2f>.jpg" e.g. "frame_12.00.jpg" -> 12.00
+Frame filenames are produced by FFmpeg's image2 muxer in the form:
+  "frame_%04d.jpg"  (1-indexed, e.g. frame_0001.jpg, frame_0024.jpg)
+
+Timestamp is reconstructed as:
+  timestamp_seconds = (frame_index - 1) / fps
+
+where `fps` is the adaptive extraction rate passed in from pipeline.py.
 """
 
 import os
@@ -24,7 +29,10 @@ logger = logging.getLogger("tracevision.clip")
 _DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 _MODEL = None
 _PREPROCESS = None
-_FRAME_FILENAME_RE = re.compile(r"frame_([0-9]+\.[0-9]+)\.jpg$")
+
+# Matches frame_%04d.jpg filenames produced by FFmpeg's image2 muxer.
+# Captures the 1-based integer frame index (e.g. "0001" from "frame_0001.jpg").
+_FRAME_FILENAME_RE = re.compile(r"frame_(\d+)\.jpg$")
 
 
 def _load_model():
@@ -39,21 +47,49 @@ def _load_model():
     return _MODEL, _PREPROCESS
 
 
-def _timestamp_from_filename(path: str) -> float:
+def _timestamp_from_filename(path: str, fps: float) -> float:
+    """
+    Converts an FFmpeg frame_%04d.jpg filename back to a video timestamp.
+
+    FFmpeg's image2 muxer produces 1-indexed filenames:
+      frame_0001.jpg -> frame_index=1 -> timestamp = (1-1)/fps = 0.0s
+      frame_0002.jpg -> frame_index=2 -> timestamp = (2-1)/fps = 1.0s  (at 1fps)
+      frame_0025.jpg -> frame_index=25 -> timestamp = (25-1)/fps = 24.0s (at 1fps)
+
+    Args:
+        path: Absolute path to the frame file.
+        fps:  The extraction FPS passed in from pipeline.py's _adaptive_fps().
+
+    Raises:
+        ValueError: If the filename doesn't match the expected pattern.
+    """
     match = _FRAME_FILENAME_RE.search(os.path.basename(path))
     if not match:
-        raise ValueError(f"Frame filename doesn't match expected pattern: {path}")
-    return float(match.group(1))
+        raise ValueError(
+            f"Frame filename doesn't match FFmpeg frame_%04d.jpg pattern: {path}"
+        )
+    frame_index = int(match.group(1))
+    return round((frame_index - 1) / fps, 2)
 
 
-def evaluate_video_frames(frames_dir: str, query: str, batch_size: int = 32) -> List[Dict[str, float]]:
+def evaluate_video_frames(frames_dir: str, query: str, fps: float = 1.0, batch_size: int = 32) -> List[Dict[str, float]]:
     """
     Scores every frame in frames_dir against `query` using CLIP cosine similarity.
-    Returns: [{"timestamp_seconds": float, "confidence": float}, ...]
-    Confidence is raw CLIP cosine similarity (typically ~0.20-0.35 for real
-    matches on natural photos) — this matches the numeric range you were
-    already observing, so pipeline.py's noise floor / top-k logic doesn't
-    need retuning.
+
+    Args:
+        frames_dir: Directory containing frame_%04d.jpg files from FFmpeg.
+        query:      The CLIP-optimized visual caption to score against.
+        fps:        The extraction FPS used by _extract_frames_ffmpeg(). Used to
+                    reconstruct per-frame timestamps from the sequential filenames.
+                    Defaults to 1.0 (safe for backward compat).
+        batch_size: How many frames to encode in one GPU batch.
+
+    Returns:
+        [{"timestamp_seconds": float, "confidence": float}, ...]
+        Confidence is raw CLIP cosine similarity (typically ~0.20-0.35 for real
+        matches on natural photos) — this matches the numeric range you were
+        already observing, so pipeline.py's noise floor / top-k logic doesn't
+        need retuning.
     """
     model, preprocess = _load_model()
 
@@ -90,8 +126,13 @@ def evaluate_video_frames(frames_dir: str, query: str, batch_size: int = 32) -> 
             similarity = (image_features @ text_features.T).squeeze(-1)
 
         for path, sim in zip(valid_paths, similarity.tolist()):
+            try:
+                ts = _timestamp_from_filename(path, fps)
+            except ValueError as e:
+                logger.warning(f"Skipping frame with unparseable filename: {e}")
+                continue
             results.append({
-                "timestamp_seconds": _timestamp_from_filename(path),
+                "timestamp_seconds": ts,
                 "confidence": float(sim),
             })
 

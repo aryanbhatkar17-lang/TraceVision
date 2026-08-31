@@ -1,0 +1,9 @@
+﻿services:
+  - type: web
+    name: tracevision-backend
+    env: docker
+    rootDir: backend
+    plan: free
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false
