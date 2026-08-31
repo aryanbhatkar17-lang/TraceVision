@@ -9,7 +9,14 @@ import { AuditResults } from './audit-results'
 import { AuditMatch, TimelineMarker, AnalysisProgress, AuditResponse } from '@/types/audit'
 import { ShieldCheck, RotateCcw } from 'lucide-react'
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+// Server-to-server proxy (Next.js API routes → Render backend).
+// These are the routes defined in src/app/api/ and are always relative
+// to the current origin — no hardcoded host needed.
+const ANALYZE_PROXY = '/api/analyze'
+
+// Direct backend URL — only used for lightweight calls (e.g. health checks)
+// that don't involve large file uploads. Falls back to localhost for dev.
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 
 export default function Dashboard() {
   const [videoFile, setVideoFile] = useState<File | null>(null)
@@ -180,7 +187,7 @@ export default function Dashboard() {
       formData.append('duration', dur.toString())
       formData.append('fileName', fileToSend.name)
 
-      const response = await fetch(`${API_BASE}/api/analyze`, {
+      const response = await fetch(ANALYZE_PROXY, {
         method: 'POST',
         body: formData,
         signal: abortController.signal,
@@ -191,7 +198,7 @@ export default function Dashboard() {
 
       if (!response.ok) {
         const errJson = await response.json().catch(() => ({}))
-        throw new Error(errJson.detail || errJson.error || `Server returned ${response.status}: ${response.statusText}`)
+        throw new Error(errJson.detail || errJson.error || `Analysis failed (${response.status}): ${response.statusText} — backend: ${API_BASE_URL}`)
       }
 
       const data: AuditResponse = await response.json()

@@ -4,7 +4,7 @@ import { AuditMatch, AuditResponse } from '@/types/audit'
 export const dynamic = 'force-dynamic'
 export const maxDuration = 60
 
-const BACKEND_URL = process.env.BACKEND_URL || 'http://127.0.0.1:8000'
+const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:8000'
 
 // Interface for backend raw match objects
 interface RawBackendMatch {
