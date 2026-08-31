@@ -28,7 +28,8 @@ ENV PYTHONPATH=/app/backend
 EXPOSE 8000
 
 # Runs server.py (or api.py) inside backend
-CMD ["uvicorn", "backend.api:api", "--host", "0.0.0.0", "--port", "8000"]
+#CMD ["uvicorn", "backend.api:api", "--host", "0.0.0.0", "--port", "8000"]
+CMD uvicorn backend.api:app --host 0.0.0.0 --port $PORT
 
 #Use server.py strictly for local testing and development where running python server.py is convenient, 
 #but rely on CMD ["uvicorn", "backend.api:api", "--host", "0.0.0.0", "--port", "8000"] for your production Docker image.  
