@@ -9,13 +9,11 @@ import { AuditResults } from './audit-results'
 import { AuditMatch, TimelineMarker, AnalysisProgress, AuditResponse } from '@/types/audit'
 import { ShieldCheck, RotateCcw } from 'lucide-react'
 
-// Server-to-server proxy (Next.js API routes → Render backend).
-// These are the routes defined in src/app/api/ and are always relative
-// to the current origin — no hardcoded host needed.
-const ANALYZE_PROXY = '/api/analyze'
-
-// Direct backend URL — only used for lightweight calls (e.g. health checks)
-// that don't involve large file uploads. Falls back to localhost for dev.
+// Direct-to-Render backend URL.
+// The browser uploads straight to Render — bypassing Vercel entirely and
+// avoiding the 4.5 MB Serverless Function body limit. CORS is open on
+// the backend with allow_origins=["*"] so this is safe.
+// Set NEXT_PUBLIC_API_URL in Vercel → Project Settings → Environment Variables.
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 
 export default function Dashboard() {
@@ -187,7 +185,7 @@ export default function Dashboard() {
       formData.append('duration', dur.toString())
       formData.append('fileName', fileToSend.name)
 
-      const response = await fetch(ANALYZE_PROXY, {
+      const response = await fetch(`${API_BASE_URL}/api/analyze`, {
         method: 'POST',
         body: formData,
         signal: abortController.signal,
@@ -198,7 +196,7 @@ export default function Dashboard() {
 
       if (!response.ok) {
         const errJson = await response.json().catch(() => ({}))
-        throw new Error(errJson.detail || errJson.error || `Analysis failed (${response.status}): ${response.statusText} — backend: ${API_BASE_URL}`)
+        throw new Error(errJson.detail || errJson.error || `Server returned ${response.status}: ${response.statusText}`)
       }
 
       const data: AuditResponse = await response.json()
