@@ -117,12 +117,11 @@ app = FastAPI(
     version="1.1.0"
 )
 
-ALLOWED_ORIGINS = os.environ.get("CORS_ORIGINS", "http://localhost:3000").split(",")
-
+# Production CORS: allow_origins=["*"] so the Vercel frontend is never blocked.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,   # must be False when allow_origins=["*"]
     allow_methods=["GET", "POST", "PUT", "DELETE"],
     allow_headers=["*"],
 )
@@ -141,6 +140,18 @@ except Exception:
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 logger.info(f"Sentinel Video Storage Directory: {UPLOAD_DIR}")
+
+# --------------------------------------------------------------------------
+# Static Frame Serving — cloud-safe (Render ephemeral filesystem)
+# Creates the directory on startup so app.mount() never crashes even on a
+# fresh Render container, and serves frames at /frames/<filename>.
+# --------------------------------------------------------------------------
+from fastapi.staticfiles import StaticFiles
+
+FRAMES_DIR = Path("temp_frames")
+FRAMES_DIR.mkdir(parents=True, exist_ok=True)
+
+app.mount("/frames", StaticFiles(directory=str(FRAMES_DIR)), name="frames")
 
 # --------------------------------------------------------------------------
 # Compression & Caching Directories
@@ -1087,4 +1098,4 @@ async def analyze_video_stream(
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))

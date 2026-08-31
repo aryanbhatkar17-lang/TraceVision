@@ -59,13 +59,12 @@ api = FastAPI(
     version="2.1.0",
 )
 
-# Merged from upstream/main: Secure CORS handling
-ALLOWED_ORIGINS = os.environ.get("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
-
+# Production CORS: allow_origins=["*"] so the Vercel frontend is never blocked.
+# Render assigns the domain dynamically; wildcard is safe for a public API.
 api.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,   # must be False when allow_origins=["*"]
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -365,4 +364,4 @@ if __name__ == "__main__":
     logger.info(f"  VRAM Cap: {monitor.vram_ceiling_mb:.0f} MB")
     logger.info("=" * 60)
 
-    uvicorn.run(api, host="0.0.0.0", port=8000)
+    uvicorn.run(api, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
