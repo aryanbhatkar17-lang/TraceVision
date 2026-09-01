@@ -13,8 +13,7 @@ import { ShieldCheck, RotateCcw } from 'lucide-react'
 // The browser uploads straight to Render — bypassing Vercel entirely and
 // avoiding the 4.5 MB Serverless Function body limit. CORS is open on
 // the backend with allow_origins=["*"] so this is safe.
-// Set NEXT_PUBLIC_API_URL in Vercel → Project Settings → Environment Variables.
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+const API_BASE_URL = "https://sih-2026-6ifa.onrender.com"
 
 export default function Dashboard() {
   const [videoFile, setVideoFile] = useState<File | null>(null)
@@ -185,6 +184,7 @@ export default function Dashboard() {
       formData.append('duration', dur.toString())
       formData.append('fileName', fileToSend.name)
 
+      // Use the modern api.py endpoint, not the legacy heuristic mock endpoint!
       const response = await fetch(`${API_BASE_URL}/api/analyze`, {
         method: 'POST',
         body: formData,
@@ -229,6 +229,10 @@ export default function Dashboard() {
       if (err instanceof Error && err.name === 'AbortError') {
         return
       }
+      // Force empty state on failure (destroying any fallback/dummy data traces)
+      setMatches([])
+      setMarkers([])
+      
       const message = err instanceof Error ? err.message : 'Analysis failed. Please check video format and retry.'
       console.error('Analysis error:', err)
       setProgress({
