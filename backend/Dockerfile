@@ -19,4 +19,4 @@ ENV PORT=8000
 EXPOSE $PORT
 
 # Start the FastAPI server using run.py or directly via uvicorn
-CMD ["sh", "-c", "uvicorn api:api --host 0.0.0.0 --port $PORT"]
+CMD ["sh", "-c", "uvicorn server:app --host 0.0.0.0 --port $PORT"]
