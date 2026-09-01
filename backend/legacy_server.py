@@ -567,6 +567,7 @@ class SemanticVideoAuditor:
 
     def __init__(self):
         self.gemini_api_key = os.environ.get("GEMINI_API_KEY", "")
+        self._validation_semaphore = asyncio.Semaphore(5)
 
     async def validate_frames(self, frame_paths: List[str], original_query: str) -> List[Dict[str, Any]]:
         """

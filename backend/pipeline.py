@@ -3,6 +3,7 @@ import subprocess
 import shutil
 import logging
 import tempfile
+import torch
 from pathlib import Path
 from dotenv import load_dotenv
 
