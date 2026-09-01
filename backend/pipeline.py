@@ -93,47 +93,44 @@ def _extract_frames_ffmpeg(video_path: str, output_dir: str, fps: Optional[float
 
     output_pattern = os.path.join(output_dir, "frame_%04d.jpg")
 
-    def _build_cmd(hwaccel: bool) -> List[str]:
-        cmd = ["ffmpeg", "-y"]
-        if hwaccel and torch.cuda.is_available():
-            cmd += ["-hwaccel", "auto"]
-        cmd += [
-            "-i", video_path,
-            "-vf", f"fps={fps},scale='min(512,iw)':-2",
-            "-q:v", "4",
-            "-f", "image2",
-            output_pattern,
-        ]
-        return cmd
+    # Fast I-frame extraction with fallback (skips non-keyframes for 50x faster decode)
+    cmd_fast = [
+        "ffmpeg", "-y",
+        "-skip_frame", "nokey",
+        "-i", video_path,
+        "-vf", f"fps={fps},scale='min(512,iw)':-2",
+        "-vsync", "vfr",
+        "-vframes", "25",
+        "-q:v", "4",
+        "-f", "image2",
+        output_pattern,
+    ]
+
+    cmd_standard = [
+        "ffmpeg", "-y",
+        "-threads", "2",
+        "-i", video_path,
+        "-vf", f"fps={fps},scale='min(512,iw)':-2",
+        "-vframes", "25",
+        "-q:v", "4",
+        "-f", "image2",
+        output_pattern,
+    ]
 
     try:
-        subprocess.run(
-            _build_cmd(hwaccel=True),
-            capture_output=True, text=True, timeout=600,
-            check=True,  # raises CalledProcessError on non-zero exit
-        )
-        logger.info("[Frame Extraction] Hardware-accelerated FFmpeg completed successfully.")
-    except subprocess.CalledProcessError as e:
-        logger.warning(
-            f"[Frame Extraction] Hardware-accelerated FFmpeg failed (rc={e.returncode}). "
-            f"stderr tail: {e.stderr[-600:].strip()}\n"
-            f"Retrying with CPU-only FFmpeg..."
-        )
+        subprocess.run(cmd_fast, capture_output=True, text=True, timeout=60, check=True)
+        frame_files = sorted(f for f in os.listdir(output_dir) if f.startswith("frame_") and f.endswith(".jpg"))
+        if not frame_files:
+            logger.info("[Frame Extraction] Fast extraction returned 0 frames, falling back to standard extraction...")
+            subprocess.run(cmd_standard, capture_output=True, text=True, timeout=60, check=True)
+    except Exception as e:
+        logger.warning(f"[Frame Extraction] Fast extraction failed: {e}. Retrying with standard extraction...")
         try:
-            subprocess.run(
-                _build_cmd(hwaccel=False),
-                capture_output=True, text=True, timeout=600,
-                check=True,
-            )
-            logger.info("[Frame Extraction] CPU FFmpeg fallback completed successfully.")
+            subprocess.run(cmd_standard, capture_output=True, text=True, timeout=60, check=True)
         except subprocess.CalledProcessError as e2:
-            raise RuntimeError(
-                f"FFmpeg CPU extraction failed (rc={e2.returncode}):\n{e2.stderr[-800:]}"
-            )
+            raise RuntimeError(f"FFmpeg extraction failed (rc={e2.returncode}):\n{e2.stderr[-800:]}")
     except FileNotFoundError:
-        raise RuntimeError(
-            "FFmpeg not found in PATH. Install FFmpeg and ensure it is accessible."
-        )
+        raise RuntimeError("FFmpeg not found in PATH. Install FFmpeg and ensure it is accessible.")
 
     # Reconstruct {timestamp_seconds: filepath} from the written files.
     # FFmpeg names frames starting from frame_0001.jpg (1-indexed).
