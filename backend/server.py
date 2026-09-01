@@ -38,7 +38,7 @@ from legacy_server import (
     AuditResponseSchema,
     format_timestamp,
     UPLOAD_DIR,
-    app as server_app,
+    app as legacy_app,
 )
 
 # Import our new infrastructure
@@ -85,7 +85,7 @@ smoother = TemporalSmoother(
 processor = VideoChunkProcessor(chunk_duration_sec=60.0, sample_fps=1.0)
 auditor = SemanticVideoAuditor()
 
-add_hardware_headers_middleware(api, monitor)
+add_hardware_headers_middleware(app, monitor)
 
 # ---------------------------------------------------------------------------
 # Request / Response Schemas
@@ -348,7 +348,7 @@ async def cut_clips_batch(
 app.mount("/legacy", legacy_app)
 
 from legacy_server import upload_video
-api.post("/api/upload")(upload_video)
+app.post("/api/upload")(upload_video)
 
 # ---------------------------------------------------------------------------
 # Entry Point
@@ -364,4 +364,4 @@ if __name__ == "__main__":
     logger.info(f"  VRAM Cap: {monitor.vram_ceiling_mb:.0f} MB")
     logger.info("=" * 60)
 
-    uvicorn.run(api, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
