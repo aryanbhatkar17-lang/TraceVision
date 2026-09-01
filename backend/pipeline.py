@@ -36,21 +36,13 @@ TRANSLATION_MODEL = "gemini-3.5-flash-lite"
 
 # --- Tunable constants -------------------------------------------------
 CLIP_NOISE_FLOOR    = 0.10  # Low floor keeps compositional/spatial queries alive
-CLIP_TOP_K          = 50    # Number of uniform timeline bins to slice the video into.
-                            # Since all candidates go in one Gemini batch call (no
-                            # per-frame quota cost), doubling from 25→50 halves the
-                            # blind-spot window from ~82s to ~41s on a 34-min video.
-CLIP_PEAKS_PER_BIN  = 2    # Top-N CLIP candidates to keep per bin.
-                            # Diagnostic: the 11:47 orange truck scored 0.2469 while
-                            # an Eddie Stobart truck at 11:42 scored 0.2745 in the
-                            # same bin. Single-winner binning discarded 11:47 entirely.
-                            # With N=2, both candidates reach Gemini; Gemini correctly
-                            # rejects 11:42 (green truck) and confirms 11:47 (orange).
+CLIP_TOP_K          = 15    # Number of uniform timeline bins
+CLIP_PEAKS_PER_BIN  = 1    # Top-N CLIP candidates to keep per bin
 # ------------------------------------------------------------------------
 
 
 # ---------------------------------------------------------------------------
-# Frame Extraction — FFmpeg CUDA Hardware-Accelerated
+# Frame Extraction — FFmpeg Hardware-Accelerated with Fast Fallback
 # ---------------------------------------------------------------------------
 
 def _get_video_duration(video_path: str) -> float:
@@ -76,36 +68,18 @@ def _get_video_duration(video_path: str) -> float:
 
 def _adaptive_fps(duration_sec: float) -> float:
     """
-    Choose extraction FPS based on video duration to balance frame count
-    against OOM risk on massive CCTV files.
-      <=30s  → 2.0 fps  (dense sampling for short clips)
-      <=600s → 1.0 fps  (standard for sub-10-min footage)
-       >600s → 0.5 fps  (1 frame per 2s for long surveillance recordings)
+    Choose extraction FPS to cap total frames to ~25 frames,
+    ensuring lightning fast CPU extraction and CLIP scoring.
     """
-    if duration_sec <= 30:
-        return 2.0
-    elif duration_sec <= 600:
+    if duration_sec <= 0:
         return 1.0
-    else:
-        return 0.5
+    fps = 25.0 / max(duration_sec, 1.0)
+    return round(max(min(fps, 1.0), 0.05), 3)
 
 
 def _extract_frames_ffmpeg(video_path: str, output_dir: str, fps: Optional[float] = None) -> Dict[float, str]:
     """
-    Extract frames using native FFmpeg with CUDA hardware acceleration.
-
-    Why FFmpeg over OpenCV:
-    - NVDEC/CUDA decoding offloads H.264/H.265 decode from the CPU to the GPU
-      decoder engine, cutting extraction wall-time by 3-5x on CCTV H.264.
-    - FFmpeg's scale filter with -2 alignment guarantees even dimensions
-      (no odd-number width/height libx264 crash).
-    - JPEG quality via -q:v 2 (~93% quality) exceeds the OpenCV Q85 baseline,
-      preserving fine spatial detail for Gemini's 1024px forensic scan.
-
-    Falls back to CPU FFmpeg if CUDA is unavailable on this machine.
-
-    Returns:
-        Dict[timestamp_seconds, frame_file_path]
+    Extract frames using native FFmpeg.
     """
     duration_sec = _get_video_duration(video_path)
     if fps is None:
@@ -116,24 +90,16 @@ def _extract_frames_ffmpeg(video_path: str, output_dir: str, fps: Optional[float
         f"estimated_frames={int(duration_sec * fps)}"
     )
 
-    # Output pattern: frame_%04d.jpg  (1-indexed, e.g. frame_0001.jpg)
     output_pattern = os.path.join(output_dir, "frame_%04d.jpg")
 
-    # -hwaccel cuda     — NVDEC hardware decoder (drops to CPU on failure)
-    # fps=...,scale     — sample rate + clamp long side to 1024px; -2 = even dim
-    # -q:v 2            — near-lossless JPEG (~93% quality)
-    # -f image2         — image sequence muxer
     def _build_cmd(hwaccel: bool) -> List[str]:
         cmd = ["ffmpeg", "-y"]
-        if hwaccel:
-            # -hwaccel auto: lets FFmpeg pick the best available decoder
-            # (NVDEC for NVIDIA, AMF for AMD, QuickSync for Intel).
-            # Falls back to software if no HW decoder matches the codec.
+        if hwaccel and torch.cuda.is_available():
             cmd += ["-hwaccel", "auto"]
         cmd += [
             "-i", video_path,
-            "-vf", f"fps={fps},scale='min(1024,iw)':-2",
-            "-q:v", "2",
+            "-vf", f"fps={fps},scale='min(512,iw)':-2",
+            "-q:v", "4",
             "-f", "image2",
             output_pattern,
         ]
