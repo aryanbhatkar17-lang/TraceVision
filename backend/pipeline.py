@@ -264,92 +264,36 @@ async def _run_search_pipeline(video_path: str, raw_query: str, smoother: "Tempo
             raise RuntimeError("No frames were extracted from the video — check the source file.")
 
         # ------------------------------------------------------------
-        # STAGE 3: CLIP Retrieval with Timeline-Aware Bucketing
+        # STAGE 3: Timeline Candidate Selection
         # ------------------------------------------------------------
-        # Pass adaptive_fps so clip_engine can compute timestamps as:
-        #   timestamp = (frame_index - 1) / adaptive_fps
-        raw_scores: List[Dict[str, float]] = evaluate_video_frames(temp_frames_dir, clip_query, fps=adaptive_fps)
-
-        # Noise floor: 0.10 prevents spatial/compositional queries from being
-        # dropped prematurely (they inherently score lower than simple object queries).
-        above_noise_floor = [f for f in raw_scores if f["confidence"] >= CLIP_NOISE_FLOOR]
-
-        # ------------------------------------------------------------------
-        # Temporal Sub-Window Peak Sampling — Top-N Per Bin
-        #
-        # ROOT CAUSE FIX: "Binning Collision" false negatives.
-        # Empirically traced on the 34-min orange-truck video:
-        #   - Bin 8 (10:55–12:17): Eddie Stobart green truck at 11:42 scored
-        #     0.2745 CLIP; real orange truck at 11:47 scored 0.2469.
-        #   - Old single-winner logic: 11:42 wins → 11:47 is discarded forever.
-        #   - Gemini sees 11:42, correctly says "no orange truck" → false negative.
-        #
-        # Fix: keep CLIP_PEAKS_PER_BIN=2 candidates per bin. Both the 11:42
-        # false-positive and 11:47 real-positive are forwarded to Gemini. Gemini
-        # then independently rejects 11:42 (green) and confirms 11:47 (orange).
-        #
-        # Combined with CLIP_TOP_K=50 bins (vs 25), the total candidate budget is
-        # up to 50×2=100 frames — still a single Gemini batch call, so zero extra
-        # quota cost while halving the blind-spot window and adding redundancy.
-        # ------------------------------------------------------------------
-        if not above_noise_floor:
+        # Sort extracted frames chronologically
+        extracted_timestamps = sorted(timestamp_to_path.keys())
+        if not extracted_timestamps:
             return {"query": raw_query, "clip_query": clip_query, "matches": [], "clips": []}
 
-        scored_by_time = sorted(above_noise_floor, key=lambda f: f["timestamp_seconds"])
-        min_ts = scored_by_time[0]["timestamp_seconds"]
-        max_ts = scored_by_time[-1]["timestamp_seconds"]
-        timeline_duration = max_ts - min_ts
+        # Select up to 25 uniformly spaced candidate frames across the timeline
+        if len(extracted_timestamps) <= 25:
+            candidate_timestamps = extracted_timestamps
+        else:
+            step = len(extracted_timestamps) / 25
+            candidate_timestamps = [extracted_timestamps[int(i * step)] for i in range(25)]
 
-        # e.g. 2048s / 50 bins = ~41s per bin for a 34-min video (was 82s at 25 bins)
-        bin_size = max(timeline_duration / CLIP_TOP_K, 1.0)
-
-        # bins[bin_idx] = list of top-N frames by confidence in that bin
-        bins: Dict[int, List[Dict[str, float]]] = {}
-        for frame in scored_by_time:
-            bin_idx = int((frame["timestamp_seconds"] - min_ts) / bin_size)
-            bin_idx = min(bin_idx, CLIP_TOP_K - 1)  # clamp boundary edge case
-
-            if bin_idx not in bins:
-                bins[bin_idx] = []
-
-            peaks = bins[bin_idx]
-            peaks.append(frame)
-            # Keep only the top-N by confidence; sort descending and trim
-            peaks.sort(key=lambda f: f["confidence"], reverse=True)
-            bins[bin_idx] = peaks[:CLIP_PEAKS_PER_BIN]
-
-        # Flatten all bins, restore chronological order (critical for Gemini's
-        # frame-index-to-timestamp mapping and the temporal smoother)
-        top_candidates: List[Dict[str, float]] = []
-        for bin_idx in sorted(bins.keys()):
-            top_candidates.extend(bins[bin_idx])
-        top_candidates.sort(key=lambda f: f["timestamp_seconds"])
-
-        logger.info(
-            f"[Stage 3] CLIP retrieved {len(raw_scores)} scored frames, "
-            f"{len(above_noise_floor)} above noise floor ({CLIP_NOISE_FLOOR}). "
-            f"Timeline ({timeline_duration:.1f}s) split into {CLIP_TOP_K} bins of "
-            f"{bin_size:.1f}s (top {CLIP_PEAKS_PER_BIN} per bin). "
-            f"Selected {len(top_candidates)} candidates for Gemini validation."
-        )
-
-        if not top_candidates:
-            return {"query": raw_query, "clip_query": clip_query, "matches": [], "clips": []}
-
-        # ------------------------------------------------------------
-        # BRIDGE: map CLIP's scored timestamps -> actual frame file paths
-        # ------------------------------------------------------------
         candidate_frames_for_audit = [
             {
-                "timestamp_seconds": c["timestamp_seconds"],
-                "confidence": c["confidence"],
-                "frame_path": _closest_frame_path(c["timestamp_seconds"], timestamp_to_path),
+                "timestamp_seconds": ts,
+                "confidence": 0.85,
+                "frame_path": timestamp_to_path[ts],
             }
-            for c in top_candidates
+            for ts in candidate_timestamps
         ]
 
+        logger.info(
+            f"[Stage 3] Extracted {len(extracted_timestamps)} frames. "
+            f"Selected {len(candidate_frames_for_audit)} candidates for Gemini Multimodal Vision validation."
+        )
+
         # ------------------------------------------------------------
-        # STAGE 4: Gemini Spatial Forensic Validation
+        # STAGE 4: Gemini Multimodal Forensic Validation
         # ------------------------------------------------------------
         auditor = SemanticVideoAuditor()
 

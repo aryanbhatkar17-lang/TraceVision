@@ -178,7 +178,6 @@ export default function Dashboard() {
       }, 2500)
 
       const formData = new FormData()
-      formData.append('video', fileToSend)
       formData.append('file', fileToSend)
       formData.append('query', query)
       formData.append('duration', dur.toString())
