@@ -19,21 +19,8 @@ export const metadata: Metadata = {
     'AI-powered CCTV video summarization and forensic audit tool for security operations teams.',
   generator: 'v0.app',
   icons: {
-    icon: [
-      {
-        url: '/icon-light-32x32.png',
-        media: '(prefers-color-scheme: light)',
-      },
-      {
-        url: '/icon-dark-32x32.png',
-        media: '(prefers-color-scheme: light)',
-      },
-      {
-        url: '/icon.svg',
-        type: 'image/svg+xml',
-      },
-    ],
-    apple: '/apple-icon.png',
+    icon: '/tracevision-icon.svg',
+    apple: '/tracevision-icon.svg',
   },
 }
 

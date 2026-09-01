@@ -306,23 +306,7 @@ async def _background_compress(video_path: Path, output_path: Path):
 
 
 async def maybe_recompress_async(video_path: Path) -> Path:
-    """Non-blocking recompression. Returns original path immediately.
-    Schedules background compression for large files."""
-    size_mb = video_path.stat().st_size / (1024 * 1024)
-
-    if size_mb <= LARGE_FILE_THRESHOLD_MB:
-        return video_path  # No compression needed
-
-    output_path = COMPRESSED_DIR / f"recompressed_{video_path.name}"
-
-    # Schedule background compression (non-blocking)
-    asyncio.create_task(_background_compress(video_path, output_path))
-
-    # Return original path immediately — analysis can start right away
-    logger.info(
-        f"Scheduled background compression for {video_path.name} "
-        f"({size_mb:.1f}MB exceeds {LARGE_FILE_THRESHOLD_MB}MB threshold)"
-    )
+    """Non-blocking: returns original path immediately without background CPU/memory overhead."""
     return video_path
 
 
