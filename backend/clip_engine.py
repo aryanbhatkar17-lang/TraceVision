@@ -16,12 +16,16 @@ where `fps` is the adaptive extraction rate passed in from pipeline.py.
 
 import os
 import re
+import gc
 import glob
 import logging
 from typing import List, Dict
 
 import torch
 from PIL import Image
+
+# Force PyTorch to use 1 thread to minimize RAM arena fragmentation on 512MB instances
+torch.set_num_threads(1)
 
 logger = logging.getLogger("tracevision.clip")
 
@@ -97,20 +101,10 @@ def _timestamp_from_filename(path: str, fps: float) -> float:
     return round((frame_index - 1) / fps, 2)
 
 
-def evaluate_video_frames(frames_dir: str, query: str, fps: float = 1.0, batch_size: int = 32) -> List[Dict[str, float]]:
+def evaluate_video_frames(frames_dir: str, query: str, fps: float = 1.0, batch_size: int = 8) -> List[Dict[str, float]]:
     """
     Scores every frame in frames_dir against `query` using CLIP cosine similarity.
-
-    Args:
-        frames_dir: Directory containing frame_%04d.jpg files from FFmpeg.
-        query:      The CLIP-optimized visual caption to score against.
-        fps:        The extraction FPS used by _extract_frames_ffmpeg(). Used to
-                    reconstruct per-frame timestamps from the sequential filenames.
-                    Defaults to 1.0 (safe for backward compat).
-        batch_size: How many frames to encode in one GPU batch.
-
-    Returns:
-        [{"timestamp_seconds": float, "confidence": float}, ...]
+    Uses small batches and explicit garbage collection to stay well below 512MB RAM.
     """
     backend, model, preprocess = _load_model()
 
@@ -158,6 +152,9 @@ def evaluate_video_frames(frames_dir: str, query: str, fps: float = 1.0, batch_s
                     "timestamp_seconds": ts,
                     "confidence": float(sim),
                 })
+            
+            del images, image_batch, image_features
+            gc.collect()
     else:
         # HuggingFace transformers backend
         with torch.no_grad():
@@ -195,6 +192,9 @@ def evaluate_video_frames(frames_dir: str, query: str, fps: float = 1.0, batch_s
                     "timestamp_seconds": ts,
                     "confidence": float(sim),
                 })
+
+            del pil_images, image_inputs, image_features
+            gc.collect()
 
     results.sort(key=lambda r: r["timestamp_seconds"])
     return results
