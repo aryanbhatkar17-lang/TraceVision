@@ -1,4 +1,4 @@
-﻿FROM python:3.11-slim
+FROM python:3.11-slim
 
 # Install FFmpeg (required for video extraction)
 RUN apt-get update && \
@@ -16,7 +16,7 @@ COPY . .
 
 # Render dynamically assigns the PORT environment variable
 ENV PORT=8000
-EXPOSE 
+EXPOSE $PORT
 
 # Start the FastAPI server using run.py or directly via uvicorn
-CMD ["sh", "-c", "uvicorn api:api --host 0.0.0.0 --port "]
+CMD ["sh", "-c", "uvicorn api:api --host 0.0.0.0 --port $PORT"]
