@@ -31,7 +31,7 @@ if str(_backend_dir) not in sys.path:
 from smoothing import TemporalSmoother, ClipRange
 
 # Import existing pipeline components
-from server import (
+from legacy_server import (
     VideoChunkProcessor,
     SemanticVideoAuditor,
     MatchItem,

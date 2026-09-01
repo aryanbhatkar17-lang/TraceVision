@@ -17,7 +17,7 @@ for _candidate in _ENV_CANDIDATES:
 
 from google import genai
 from typing import List, Dict, Any, Optional
-from server import SemanticVideoAuditor
+from legacy_server import SemanticVideoAuditor
 from clip_engine import evaluate_video_frames
 from smoothing import TemporalSmoother
 
